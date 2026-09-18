@@ -57,7 +57,6 @@ export function WishlistItem({ userBook }: { userBook: UserBookWithBook }) {
               alt={userBook.book.title}
               fill
               className="object-cover"
-              unoptimized
             />
           ) : (
             <div className="flex h-full items-center justify-center">

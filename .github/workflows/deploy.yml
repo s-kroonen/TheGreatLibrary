@@ -1,0 +1,47 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Validate Docker image builds
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: the-great-library:ci-check
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Portainer stack redeploy
+        run: |
+          if [ -z "${{ secrets.PORTAINER_STACK_WEBHOOK_URL }}" ]; then
+            echo "PORTAINER_STACK_WEBHOOK_URL secret is not set — skipping deploy trigger." >&2
+            exit 1
+          fi
+          curl -fsS -X POST "${{ secrets.PORTAINER_STACK_WEBHOOK_URL }}"

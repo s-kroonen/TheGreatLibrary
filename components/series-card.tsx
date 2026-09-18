@@ -61,7 +61,6 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
                   alt={ub.book.title}
                   fill
                   className="object-cover"
-                  unoptimized
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">

@@ -102,7 +102,6 @@ export function BookSearch() {
                       alt={book.title}
                       fill
                       className="object-cover"
-                      unoptimized
                     />
                   ) : (
                     <div className="flex h-full items-center justify-center">
