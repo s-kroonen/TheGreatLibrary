@@ -1,0 +1,277 @@
+"use server";
+
+import { nanoid } from "nanoid";
+import { revalidatePath } from "next/cache";
+import { and, eq, ilike } from "drizzle-orm";
+
+import { db } from "@/db";
+import { book, series, userBook, type UserBookStatus } from "@/db/schema";
+import { requireUser } from "@/lib/session";
+import { searchBooks, lookupByIsbn } from "@/lib/books/search";
+import { getGoogleBooksPrice } from "@/lib/books/price";
+import type { NormalizedBook } from "@/lib/books/types";
+
+async function mustGetUser() {
+  const user = await requireUser();
+  if (!user) throw new Error("Not authenticated");
+  return user;
+}
+
+export async function searchBooksAction(query: string) {
+  return searchBooks(query, 20);
+}
+
+async function findOrCreateSeries(name: string): Promise<string> {
+  const existing = await db.query.series.findFirst({
+    where: ilike(series.name, name),
+  });
+  if (existing) return existing.id;
+
+  const id = nanoid();
+  await db.insert(series).values({ id, name });
+  return id;
+}
+
+/** Upserts a normalized external book into the shared `book` table. */
+async function upsertBook(normalized: NormalizedBook): Promise<string> {
+  const existing = await db.query.book.findFirst({
+    where: and(
+      eq(book.source, normalized.source),
+      eq(book.sourceId, normalized.sourceId)
+    ),
+  });
+  if (existing) return existing.id;
+
+  let seriesId: string | null = null;
+  if (normalized.seriesName) {
+    seriesId = await findOrCreateSeries(normalized.seriesName);
+  }
+
+  const id = nanoid();
+  await db.insert(book).values({
+    id,
+    title: normalized.title,
+    subtitle: normalized.subtitle,
+    authors: normalized.authors,
+    isbn10: normalized.isbn10,
+    isbn13: normalized.isbn13,
+    coverUrl: normalized.coverUrl,
+    description: normalized.description,
+    publisher: normalized.publisher,
+    publishedDate: normalized.publishedDate,
+    pageCount: normalized.pageCount,
+    language: normalized.language,
+    genres: normalized.genres,
+    seriesId,
+    seriesPosition: normalized.seriesPosition?.toString(),
+    source: normalized.source,
+    sourceId: normalized.sourceId,
+  });
+  return id;
+}
+
+export async function addBookAction(
+  normalized: NormalizedBook,
+  status: UserBookStatus = "owned"
+) {
+  const user = await mustGetUser();
+  const bookId = await upsertBook(normalized);
+
+  const existing = await db.query.userBook.findFirst({
+    where: and(eq(userBook.userId, user.id), eq(userBook.bookId, bookId)),
+  });
+
+  if (existing) {
+    revalidatePath("/shelf");
+    return existing.id;
+  }
+
+  const id = nanoid();
+  await db.insert(userBook).values({
+    id,
+    userId: user.id,
+    bookId,
+    status,
+  });
+
+  revalidatePath("/shelf");
+  revalidatePath("/wishlist");
+  revalidatePath("/series");
+  return id;
+}
+
+/** Adds a manually-entered book with no external source match. */
+export async function addManualBookAction(input: {
+  title: string;
+  authors: string[];
+  status: UserBookStatus;
+}) {
+  const user = await mustGetUser();
+  const id = nanoid();
+  const bookId = nanoid();
+
+  await db.insert(book).values({
+    id: bookId,
+    title: input.title,
+    authors: input.authors,
+    genres: [],
+    source: "manual",
+    sourceId: bookId,
+  });
+
+  await db.insert(userBook).values({
+    id,
+    userId: user.id,
+    bookId,
+    status: input.status,
+  });
+
+  revalidatePath("/shelf");
+  return id;
+}
+
+export async function updateUserBookAction(
+  userBookId: string,
+  fields: Partial<{
+    status: UserBookStatus;
+    rating: number | null;
+    notes: string | null;
+    tags: string[];
+    moodTags: string[];
+    format: string | null;
+    condition: string | null;
+    shelf: string | null;
+    pricePaid: string | null;
+  }>
+) {
+  const user = await mustGetUser();
+  await db
+    .update(userBook)
+    .set({ ...fields, updatedAt: new Date() })
+    .where(and(eq(userBook.id, userBookId), eq(userBook.userId, user.id)));
+
+  revalidatePath("/shelf");
+  revalidatePath("/wishlist");
+  revalidatePath(`/book/${userBookId}`);
+}
+
+export async function updateBookDetailsAction(
+  bookId: string,
+  fields: Partial<{
+    title: string;
+    subtitle: string | null;
+    authors: string[];
+    description: string | null;
+    publisher: string | null;
+    publishedDate: string | null;
+    pageCount: number | null;
+    genres: string[];
+    coverUrl: string | null;
+  }>
+) {
+  await mustGetUser();
+  await db
+    .update(book)
+    .set({ ...fields, updatedAt: new Date() })
+    .where(eq(book.id, bookId));
+
+  revalidatePath("/shelf");
+}
+
+export async function deleteUserBookAction(userBookId: string) {
+  const user = await mustGetUser();
+  await db
+    .delete(userBook)
+    .where(and(eq(userBook.id, userBookId), eq(userBook.userId, user.id)));
+
+  revalidatePath("/shelf");
+  revalidatePath("/wishlist");
+}
+
+/** Re-fetches a book's canonical data from its original external source. */
+export async function refreshBookFromSourceAction(bookId: string) {
+  await mustGetUser();
+  const existing = await db.query.book.findFirst({ where: eq(book.id, bookId) });
+  if (!existing?.isbn13 && !existing?.isbn10) return;
+
+  const fresh = await lookupByIsbn(existing.isbn13 ?? existing.isbn10!);
+  if (!fresh) return;
+
+  await db
+    .update(book)
+    .set({
+      title: fresh.title,
+      subtitle: fresh.subtitle,
+      authors: fresh.authors,
+      coverUrl: fresh.coverUrl ?? existing.coverUrl,
+      description: fresh.description ?? existing.description,
+      publisher: fresh.publisher ?? existing.publisher,
+      publishedDate: fresh.publishedDate ?? existing.publishedDate,
+      pageCount: fresh.pageCount ?? existing.pageCount,
+      genres: fresh.genres.length ? fresh.genres : existing.genres,
+      updatedAt: new Date(),
+    })
+    .where(eq(book.id, bookId));
+
+  revalidatePath("/shelf");
+}
+
+export async function checkCurrentPriceAction(userBookId: string) {
+  const user = await mustGetUser();
+  const ub = await db.query.userBook.findFirst({
+    where: and(eq(userBook.id, userBookId), eq(userBook.userId, user.id)),
+    with: { book: true },
+  });
+  if (!ub) return null;
+
+  const isbn = ub.book.isbn13 ?? ub.book.isbn10;
+  const price = isbn ? await getGoogleBooksPrice(isbn) : null;
+
+  await db
+    .update(userBook)
+    .set({
+      currentPrice: price ? String(price.amount) : null,
+      priceCheckedAt: new Date(),
+      priceSource: price ? "googlebooks" : null,
+      priceUrl: price?.url ?? null,
+    })
+    .where(eq(userBook.id, userBookId));
+
+  revalidatePath("/wishlist");
+  return price;
+}
+
+/** Adds every book found for a series (via search) that the user doesn't
+ * already have, straight to their wishlist. */
+export async function addMissingSeriesBooksToWishlistAction(
+  seriesName: string
+) {
+  const user = await mustGetUser();
+  const found = await searchBooks(seriesName, 40);
+  const inSeries = found.filter(
+    (b) => b.seriesName?.toLowerCase() === seriesName.toLowerCase()
+  );
+
+  const ownedIsbns = new Set(
+    (
+      await db.query.userBook.findMany({
+        where: eq(userBook.userId, user.id),
+        with: { book: true },
+      })
+    )
+      .map((ub) => ub.book.isbn13 ?? ub.book.isbn10)
+      .filter(Boolean)
+  );
+
+  let added = 0;
+  for (const candidate of inSeries) {
+    const isbn = candidate.isbn13 ?? candidate.isbn10;
+    if (isbn && ownedIsbns.has(isbn)) continue;
+    await addBookAction(candidate, "wishlist");
+    added++;
+  }
+
+  revalidatePath("/series");
+  revalidatePath("/wishlist");
+  return added;
+}
