@@ -165,6 +165,18 @@ export const userBook = pgTable(
   ]
 );
 
+// A public, unauthenticated share link for a user's wishlist. Presence of
+// a row = sharing is on; deleting it revokes the link immediately.
+export const wishlistShare = pgTable("wishlist_share", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => user.id, { onDelete: "cascade" }),
+  token: text("token").notNull().unique(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 // ---------- Relations ----------
 
 export const seriesRelations = relations(series, ({ many }) => ({
@@ -176,10 +188,14 @@ export const bookRelations = relations(book, ({ one, many }) => ({
   userBooks: many(userBook),
 }));
 
-export const userRelations = relations(user, ({ many }) => ({
+export const userRelations = relations(user, ({ many, one }) => ({
   sessions: many(session),
   accounts: many(account),
   books: many(userBook),
+  wishlistShare: one(wishlistShare, {
+    fields: [user.id],
+    references: [wishlistShare.userId],
+  }),
 }));
 
 export const userBookRelations = relations(userBook, ({ one }) => ({

@@ -36,7 +36,7 @@ export async function getGoogleBooksPrice(
 export function retailerSearchLinks(query: string) {
   const q = encodeURIComponent(query);
   return [
-    { name: "Amazon", url: `https://www.amazon.com/s?k=${q}&i=stripbooks` },
+    { name: "Amazon.nl", url: `https://www.amazon.nl/s?k=${q}&i=stripbooks` },
     { name: "bol.com", url: `https://www.bol.com/nl/nl/s/?searchtext=${q}` },
   ];
 }

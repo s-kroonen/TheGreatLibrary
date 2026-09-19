@@ -5,7 +5,13 @@ import { revalidatePath } from "next/cache";
 import { and, eq, ilike } from "drizzle-orm";
 
 import { db } from "@/db";
-import { book, series, userBook, type UserBookStatus } from "@/db/schema";
+import {
+  book,
+  series,
+  userBook,
+  wishlistShare,
+  type UserBookStatus,
+} from "@/db/schema";
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { getGoogleBooksPrice } from "@/lib/books/price";
@@ -274,4 +280,28 @@ export async function addMissingSeriesBooksToWishlistAction(
   revalidatePath("/series");
   revalidatePath("/wishlist");
   return added;
+}
+
+/** Turns on (or reuses) a public, no-login-required share link for the
+ * current user's wishlist. */
+export async function enableWishlistShareAction() {
+  const user = await mustGetUser();
+  const existing = await db.query.wishlistShare.findFirst({
+    where: eq(wishlistShare.userId, user.id),
+  });
+  if (existing) return existing.token;
+
+  const token = nanoid(24);
+  await db.insert(wishlistShare).values({ id: nanoid(), userId: user.id, token });
+
+  revalidatePath("/wishlist");
+  return token;
+}
+
+/** Revokes the current share link — the old URL stops working immediately.
+ * Sharing again afterwards issues a brand new token. */
+export async function revokeWishlistShareAction() {
+  const user = await mustGetUser();
+  await db.delete(wishlistShare).where(eq(wishlistShare.userId, user.id));
+  revalidatePath("/wishlist");
 }

@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import { userBook } from "@/db/schema";
+import { user, userBook, wishlistShare } from "@/db/schema";
 
 export async function getUserBookById(userId: string, userBookId: string) {
   return db.query.userBook.findFirst({
@@ -69,6 +69,36 @@ export async function getSeriesOverview(userId: string) {
       missing,
     };
   });
+}
+
+export async function getWishlistShare(userId: string) {
+  const share = await db.query.wishlistShare.findFirst({
+    where: eq(wishlistShare.userId, userId),
+  });
+  return share?.token ?? null;
+}
+
+export async function getPublicWishlist(token: string) {
+  const share = await db.query.wishlistShare.findFirst({
+    where: eq(wishlistShare.token, token),
+  });
+  if (!share) return null;
+
+  const owner = await db.query.user.findFirst({
+    where: eq(user.id, share.userId),
+  });
+  if (!owner) return null;
+
+  const books = await db.query.userBook.findMany({
+    where: and(
+      eq(userBook.userId, share.userId),
+      eq(userBook.status, "wishlist")
+    ),
+    with: { book: true },
+    orderBy: [desc(userBook.addedAt)],
+  });
+
+  return { ownerName: owner.name, books };
 }
 
 export async function getStats(userId: string) {

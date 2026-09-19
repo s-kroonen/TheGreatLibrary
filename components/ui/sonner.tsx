@@ -13,11 +13,14 @@ const Toaster = ({ ...props }: ToasterProps) => {
       position="bottom-center"
       richColors
       className="toaster group"
+      offset={{ bottom: "24px" }}
+      mobileOffset={{ bottom: "88px" }}
       style={
         {
           "--normal-bg": "var(--popover)",
           "--normal-text": "var(--popover-foreground)",
           "--normal-border": "var(--border)",
+          zIndex: 60,
         } as React.CSSProperties
       }
       {...props}
