@@ -9,8 +9,7 @@ import {
   useMemo,
 } from "react";
 import { useRouter } from "next/navigation";
-import Image from "next/image";
-import { BookOpen, Check, Loader2, Plus, Search } from "lucide-react";
+import { Check, Loader2, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { Input } from "@/components/ui/input";
@@ -24,6 +23,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { BookCover } from "@/components/book-cover";
+import { ViewToggle } from "@/components/view-toggle";
+import { useViewMode } from "@/lib/hooks/use-view-mode";
 import {
   searchBooksAction,
   addBookAction,
@@ -37,6 +39,49 @@ const LANGUAGE_OPTIONS: { value: LanguageFilter; label: string }[] = [
   { value: "nl", label: "Dutch" },
 ];
 
+function AddButtons({
+  book,
+  busy,
+  onAdd,
+  size = "sm",
+}: {
+  book: SearchResult;
+  busy: boolean;
+  onAdd: (book: SearchResult, status: "owned" | "wishlist") => void;
+  size?: "sm" | "default";
+}) {
+  const isOwned = !!book.existingStatus && book.existingStatus !== "wishlist";
+  const isWishlisted = book.existingStatus === "wishlist";
+
+  return (
+    <>
+      <Button
+        size={size}
+        disabled={busy || isOwned}
+        onClick={() => onAdd(book, "owned")}
+      >
+        {busy ? (
+          <Loader2 className="size-4 animate-spin" />
+        ) : isOwned ? (
+          <Check className="size-4" />
+        ) : (
+          <Plus className="size-4" />
+        )}
+        {isOwned ? "Owned" : "Own it"}
+      </Button>
+      <Button
+        size={size}
+        variant="outline"
+        disabled={busy || isOwned || isWishlisted}
+        onClick={() => onAdd(book, "wishlist")}
+      >
+        {isWishlisted && <Check className="size-4" />}
+        {isWishlisted ? "Wishlisted" : "Wishlist"}
+      </Button>
+    </>
+  );
+}
+
 export function BookSearch() {
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -49,6 +94,7 @@ export function BookSearch() {
   );
   const [showOtherLanguages, setShowOtherLanguages] = useState(false);
   const [genre, setGenre] = useState("all");
+  const [view, setView] = useViewMode("search", "list");
   const router = useRouter();
   const requestId = useRef(0);
 
@@ -199,33 +245,52 @@ export function BookSearch() {
             </SelectContent>
           </Select>
         )}
+        <ViewToggle
+          mode={view}
+          onChange={setView}
+          className={genreOptions.length === 0 ? "ml-auto" : undefined}
+        />
       </div>
 
-      {displayResults.length > 0 && (
-        <div className="flex flex-col gap-3">
-          {displayResults.map((book) => {
-            const isOwned =
-              !!book.existingStatus && book.existingStatus !== "wishlist";
-            const isWishlisted = book.existingStatus === "wishlist";
-            const busy = adding === book.sourceId;
-
-            return (
+      {displayResults.length > 0 &&
+        (view === "grid" ? (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
+            {displayResults.map((book) => (
+              <div
+                key={`${book.source}-${book.sourceId}`}
+                className="flex flex-col gap-2"
+              >
+                <BookCover coverUrl={book.coverUrl} title={book.title} />
+                <div className="flex flex-col">
+                  <p className="line-clamp-2 text-sm font-medium leading-tight">
+                    {book.title}
+                  </p>
+                  {book.authors.length > 0 && (
+                    <p className="line-clamp-1 text-xs text-muted-foreground">
+                      {book.authors.join(", ")}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <AddButtons
+                    book={book}
+                    busy={adding === book.sourceId}
+                    onAdd={handleAdd}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {displayResults.map((book) => (
               <Card key={`${book.source}-${book.sourceId}`}>
                 <CardContent className="flex gap-4 p-4">
-                  <div className="relative h-24 w-16 shrink-0 overflow-hidden rounded-sm bg-muted">
-                    {book.coverUrl ? (
-                      <Image
-                        src={book.coverUrl}
-                        alt={book.title}
-                        fill
-                        className="object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center">
-                        <BookOpen className="size-6 text-muted-foreground" />
-                      </div>
-                    )}
-                  </div>
+                  <BookCover
+                    coverUrl={book.coverUrl}
+                    title={book.title}
+                    className="h-24 w-16 shrink-0"
+                  />
 
                   <div className="flex flex-1 flex-col gap-1">
                     <p className="font-medium leading-tight">{book.title}</p>
@@ -247,37 +312,18 @@ export function BookSearch() {
                     </div>
 
                     <div className="mt-2 flex gap-2">
-                      <Button
-                        size="sm"
-                        disabled={busy || isOwned}
-                        onClick={() => handleAdd(book, "owned")}
-                      >
-                        {busy ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : isOwned ? (
-                          <Check className="size-4" />
-                        ) : (
-                          <Plus className="size-4" />
-                        )}
-                        {isOwned ? "Owned" : "Own it"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy || isOwned || isWishlisted}
-                        onClick={() => handleAdd(book, "wishlist")}
-                      >
-                        {isWishlisted && <Check className="size-4" />}
-                        {isWishlisted ? "Wishlisted" : "Wishlist"}
-                      </Button>
+                      <AddButtons
+                        book={book}
+                        busy={adding === book.sourceId}
+                        onAdd={handleAdd}
+                      />
                     </div>
                   </div>
                 </CardContent>
               </Card>
-            );
-          })}
-        </div>
-      )}
+            ))}
+          </div>
+        ))}
 
       {displaySearched && !searching && displayResults.length === 0 && (
         <Card>
