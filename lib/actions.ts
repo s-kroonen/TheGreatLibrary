@@ -23,8 +23,33 @@ async function mustGetUser() {
   return user;
 }
 
-export async function searchBooksAction(query: string) {
-  return searchBooks(query, 20);
+export type SearchResult = NormalizedBook & {
+  existingStatus: UserBookStatus | null;
+};
+
+export async function searchBooksAction(query: string): Promise<SearchResult[]> {
+  const results = await searchBooks(query, 20);
+
+  const user = await requireUser();
+  if (!user) return results.map((r) => ({ ...r, existingStatus: null }));
+
+  const library = await db.query.userBook.findMany({
+    where: eq(userBook.userId, user.id),
+    with: { book: true },
+  });
+  const statusByIsbn = new Map<string, UserBookStatus>();
+  for (const ub of library) {
+    if (ub.book.isbn13) statusByIsbn.set(ub.book.isbn13, ub.status);
+    if (ub.book.isbn10) statusByIsbn.set(ub.book.isbn10, ub.status);
+  }
+
+  return results.map((r) => ({
+    ...r,
+    existingStatus:
+      (r.isbn13 && statusByIsbn.get(r.isbn13)) ||
+      (r.isbn10 && statusByIsbn.get(r.isbn10)) ||
+      null,
+  }));
 }
 
 async function findOrCreateSeries(name: string): Promise<string> {
@@ -88,7 +113,14 @@ export async function addBookAction(
   });
 
   if (existing) {
+    if (existing.status !== status) {
+      await db
+        .update(userBook)
+        .set({ status, updatedAt: new Date() })
+        .where(eq(userBook.id, existing.id));
+    }
     revalidatePath("/shelf");
+    revalidatePath("/wishlist");
     return existing.id;
   }
 

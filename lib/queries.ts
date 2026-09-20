@@ -41,19 +41,35 @@ export async function getSeriesOverview(userId: string) {
   }
 
   return Array.from(bySeries.entries()).map(([id, data]) => {
-    const positions = data.books
-      .map((b) => b.book.seriesPosition)
-      .filter((p): p is string => p !== null)
-      .map(Number)
-      .sort((a, b) => a - b);
+    const positionOf = (b: UserBookWithBook) =>
+      b.book.seriesPosition === null ? null : Number(b.book.seriesPosition);
 
-    const maxPosition = positions.length ? Math.max(...positions) : null;
+    // "Have" = physically own it or have read/are reading/DNF'd it.
+    // Wishlisted volumes don't count toward completion — they're tracked
+    // separately so they can be badged instead of counted as missing.
+    const havePositions = data.books
+      .filter((b) => b.status !== "wishlist")
+      .map(positionOf)
+      .filter((p): p is number => p !== null);
+
+    const wishlistPositions = new Set(
+      data.books
+        .filter((b) => b.status === "wishlist")
+        .map(positionOf)
+        .filter((p): p is number => p !== null)
+    );
+
+    const allPositions = data.books
+      .map(positionOf)
+      .filter((p): p is number => p !== null);
+    const maxPosition = allPositions.length ? Math.max(...allPositions) : null;
     const total = data.expectedCount ?? maxPosition;
+
     const missing: number[] = [];
     if (total) {
-      const owned = new Set(positions);
+      const have = new Set(havePositions);
       for (let i = 1; i <= total; i++) {
-        if (!owned.has(i)) missing.push(i);
+        if (!have.has(i) && !wishlistPositions.has(i)) missing.push(i);
       }
     }
 
@@ -61,11 +77,10 @@ export async function getSeriesOverview(userId: string) {
       id,
       name: data.name,
       books: data.books.sort(
-        (a, b) =>
-          Number(a.book.seriesPosition ?? 0) -
-          Number(b.book.seriesPosition ?? 0)
+        (a, b) => (positionOf(a) ?? 0) - (positionOf(b) ?? 0)
       ),
       total,
+      haveCount: new Set(havePositions).size,
       missing,
     };
   });

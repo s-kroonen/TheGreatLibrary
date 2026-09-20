@@ -63,6 +63,7 @@ export const googleBooksProvider: BookProvider = {
     });
     const res = await fetch(`${BASE_URL}?${params.toString()}`, {
       next: { revalidate: 3600 },
+      signal: AbortSignal.timeout(3500),
     });
     if (!res.ok) return [];
     const data = (await res.json()) as { items?: GoogleVolume[] };

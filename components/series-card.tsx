@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { addMissingSeriesBooksToWishlistAction } from "@/lib/actions";
 import type { getSeriesOverview } from "@/lib/queries";
 
@@ -20,9 +21,8 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
 
-  const owned = series.books.length;
-  const total = series.total ?? owned;
-  const pct = total ? Math.round((owned / total) * 100) : 100;
+  const total = series.total ?? series.haveCount;
+  const pct = total ? Math.round((series.haveCount / total) * 100) : 100;
 
   function handleAddMissing() {
     startTransition(async () => {
@@ -42,7 +42,7 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
         <div className="flex items-center justify-between">
           <CardTitle>{series.name}</CardTitle>
           <Badge variant="secondary">
-            {owned} / {total ?? "?"}
+            {series.haveCount} / {total ?? "?"}
           </Badge>
         </div>
         <Progress value={pct} className="mt-1" />
@@ -53,7 +53,10 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
             <Link
               key={ub.id}
               href={`/book/${ub.id}`}
-              className="relative aspect-[2/3] w-16 shrink-0 overflow-hidden rounded-sm bg-muted"
+              className={cn(
+                "relative aspect-[2/3] w-16 shrink-0 overflow-hidden rounded-sm bg-muted",
+                ub.status === "wishlist" && "opacity-60 ring-2 ring-primary/50"
+              )}
             >
               {ub.book.coverUrl ? (
                 <Image
@@ -66,6 +69,11 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
                 <div className="flex h-full items-center justify-center">
                   <BookOpen className="size-4 text-muted-foreground" />
                 </div>
+              )}
+              {ub.status === "wishlist" && (
+                <span className="absolute inset-x-0 top-0 bg-primary/90 px-1 py-0.5 text-center text-[9px] font-medium text-primary-foreground">
+                  Wishlist
+                </span>
               )}
               <span className="absolute bottom-0.5 right-0.5 rounded bg-background/90 px-1 text-[10px] font-medium">
                 #{ub.book.seriesPosition ?? "?"}
