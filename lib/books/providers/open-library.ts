@@ -46,9 +46,16 @@ export const openLibraryProvider: BookProvider = {
   name: "openlibrary",
 
   async search(query, limit = 20) {
-    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    const params = new URLSearchParams({
+      q: query,
+      limit: String(limit),
+      // Restrict to the fields we actually use — the default response
+      // includes a lot more per-edition data and is noticeably slower.
+      fields: "key,title,author_name,isbn,cover_i,publisher,first_publish_year,language,subject",
+    });
     const res = await fetch(`${BASE_URL}/search.json?${params.toString()}`, {
       next: { revalidate: 3600 },
+      signal: AbortSignal.timeout(3500),
     });
     if (!res.ok) return [];
     const data = (await res.json()) as { docs?: OpenLibraryDoc[] };

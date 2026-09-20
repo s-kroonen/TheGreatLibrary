@@ -1,6 +1,12 @@
 "use client";
 
-import { useState, useTransition, useDeferredValue, useEffect } from "react";
+import {
+  useState,
+  useTransition,
+  useDeferredValue,
+  useEffect,
+  useRef,
+} from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { BookOpen, Loader2, Plus, Search } from "lucide-react";
@@ -25,17 +31,23 @@ export function BookSearch() {
   const [adding, setAdding] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
   const router = useRouter();
+  const requestId = useRef(0);
 
   useEffect(() => {
     if (!deferredQuery.trim()) return;
 
     const handle = setTimeout(() => {
+      const thisRequest = ++requestId.current;
       startSearch(async () => {
         const found = await searchBooksAction(deferredQuery);
+        // Ignore this response if a newer keystroke already kicked off
+        // another search — otherwise a slower earlier request can land
+        // after a faster later one and flash outdated results.
+        if (thisRequest !== requestId.current) return;
         setResults(found);
         setSearched(true);
       });
-    }, 350);
+    }, 200);
     return () => clearTimeout(handle);
   }, [deferredQuery]);
 
