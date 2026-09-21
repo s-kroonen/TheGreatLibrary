@@ -14,7 +14,7 @@ import {
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { getGoogleBooksPrice } from "@/lib/books/price";
-import { findOrCreateSeries } from "@/lib/series-sync";
+import { findOrCreateSeries, backfillBookSeriesByIsbn } from "@/lib/series-sync";
 import { logger } from "@/lib/logger";
 import type { NormalizedBook } from "@/lib/books/types";
 
@@ -89,10 +89,23 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
         seriesName: normalized.seriesName,
       });
     } else if (!existing.seriesId) {
+      // The search result itself had no series signal, but a deeper
+      // ISBN-based lookup (Open Library Work-level record, etc.) might
+      // still find one — the same fallback "Refresh from source" uses.
+      const isbn = existing.isbn13 ?? existing.isbn10;
+      const backfilled = isbn
+        ? await backfillBookSeriesByIsbn({
+            id: existing.id,
+            isbn13: existing.isbn13,
+            isbn10: existing.isbn10,
+            seriesId: existing.seriesId,
+          })
+        : false;
       logger.info(SCOPE, "upsertBook found existing book, still no series detected", {
         bookId: existing.id,
         title: normalized.title,
         source: normalized.source,
+        backfilledViaIsbnLookup: backfilled,
       });
     }
     return existing.id;
@@ -129,6 +142,24 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
     source: normalized.source,
     sourceId: normalized.sourceId,
   });
+
+  // Same fallback as above, for the freshly-inserted-book case: the
+  // search result had no series signal, but a deeper ISBN lookup might.
+  // One extra lookup for the book just added, not for every search result.
+  if (!seriesId && (normalized.isbn13 ?? normalized.isbn10)) {
+    const backfilled = await backfillBookSeriesByIsbn({
+      id,
+      isbn13: normalized.isbn13 ?? null,
+      isbn10: normalized.isbn10 ?? null,
+      seriesId: null,
+    });
+    logger.info(SCOPE, "upsertBook: post-insert series backfill attempt", {
+      bookId: id,
+      title: normalized.title,
+      backfilledViaIsbnLookup: backfilled,
+    });
+  }
+
   return id;
 }
 
