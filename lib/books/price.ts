@@ -1,3 +1,7 @@
+import { logger } from "@/lib/logger";
+
+const SCOPE = "price";
+
 interface GoogleVolumeSale {
   saleInfo?: {
     listPrice?: { amount: number; currencyCode: string };
@@ -17,20 +21,49 @@ export async function getGoogleBooksPrice(
   isbn: string
 ): Promise<{ amount: number; currency: string; url?: string } | null> {
   const params = new URLSearchParams({ q: `isbn:${isbn}` });
-  const res = await fetch(
-    `https://www.googleapis.com/books/v1/volumes?${params.toString()}`
-  );
-  if (!res.ok) return null;
-  const data = (await res.json()) as { items?: GoogleVolumeSale[] };
-  const sale = data.items?.[0]?.saleInfo;
-  const price = sale?.retailPrice ?? sale?.listPrice;
-  if (!price) return null;
+  const key = process.env.GOOGLE_BOOKS_API_KEY;
+  if (key) params.set("key", key);
 
-  return {
-    amount: price.amount,
-    currency: price.currencyCode,
-    url: sale?.buyLink,
-  };
+  const start = Date.now();
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/books/v1/volumes?${params.toString()}`
+    );
+    const durationMs = Date.now() - start;
+
+    if (!res.ok) {
+      logger.warn(SCOPE, "price check failed", {
+        isbn,
+        status: res.status,
+        durationMs,
+      });
+      return null;
+    }
+
+    const data = (await res.json()) as { items?: GoogleVolumeSale[] };
+    const sale = data.items?.[0]?.saleInfo;
+    const price = sale?.retailPrice ?? sale?.listPrice;
+
+    logger.info(SCOPE, "price check ok", {
+      isbn,
+      durationMs,
+      found: !!price,
+    });
+
+    if (!price) return null;
+
+    return {
+      amount: price.amount,
+      currency: price.currencyCode,
+      url: sale?.buyLink,
+    };
+  } catch (err) {
+    logger.warn(SCOPE, "price check errored", {
+      isbn,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 export function retailerSearchLinks(query: string) {

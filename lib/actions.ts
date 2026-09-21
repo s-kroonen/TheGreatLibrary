@@ -14,8 +14,11 @@ import {
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { getGoogleBooksPrice } from "@/lib/books/price";
-import { findOrCreateSeries } from "@/lib/series-sync";
+import { findOrCreateSeries, backfillBookSeriesByIsbn } from "@/lib/series-sync";
+import { logger } from "@/lib/logger";
 import type { NormalizedBook } from "@/lib/books/types";
+
+const SCOPE = "actions";
 
 async function mustGetUser() {
   const user = await requireUser();
@@ -28,9 +31,13 @@ export type SearchResult = NormalizedBook & {
 };
 
 export async function searchBooksAction(query: string): Promise<SearchResult[]> {
+  const user = await requireUser();
+  logger.info(SCOPE, "searchBooksAction called", {
+    query,
+    userId: user?.id ?? null,
+  });
   const results = await searchBooks(query, 20);
 
-  const user = await requireUser();
   if (!user) return results.map((r) => ({ ...r, existingStatus: null }));
 
   const library = await db.query.userBook.findMany({
@@ -76,6 +83,30 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
           updatedAt: new Date(),
         })
         .where(eq(book.id, existing.id));
+      logger.info(SCOPE, "upsertBook backfilled series on existing book", {
+        bookId: existing.id,
+        title: normalized.title,
+        seriesName: normalized.seriesName,
+      });
+    } else if (!existing.seriesId) {
+      // The search result itself had no series signal, but a deeper
+      // ISBN-based lookup (Open Library Work-level record, etc.) might
+      // still find one — the same fallback "Refresh from source" uses.
+      const isbn = existing.isbn13 ?? existing.isbn10;
+      const backfilled = isbn
+        ? await backfillBookSeriesByIsbn({
+            id: existing.id,
+            isbn13: existing.isbn13,
+            isbn10: existing.isbn10,
+            seriesId: existing.seriesId,
+          })
+        : false;
+      logger.info(SCOPE, "upsertBook found existing book, still no series detected", {
+        bookId: existing.id,
+        title: normalized.title,
+        source: normalized.source,
+        backfilledViaIsbnLookup: backfilled,
+      });
     }
     return existing.id;
   }
@@ -83,6 +114,12 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
   let seriesId: string | null = null;
   if (normalized.seriesName) {
     seriesId = await findOrCreateSeries(normalized.seriesName);
+  } else {
+    logger.info(SCOPE, "upsertBook: no series detected on new book", {
+      title: normalized.title,
+      source: normalized.source,
+      sourceId: normalized.sourceId,
+    });
   }
 
   const id = nanoid();
@@ -105,6 +142,24 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
     source: normalized.source,
     sourceId: normalized.sourceId,
   });
+
+  // Same fallback as above, for the freshly-inserted-book case: the
+  // search result had no series signal, but a deeper ISBN lookup might.
+  // One extra lookup for the book just added, not for every search result.
+  if (!seriesId && (normalized.isbn13 ?? normalized.isbn10)) {
+    const backfilled = await backfillBookSeriesByIsbn({
+      id,
+      isbn13: normalized.isbn13 ?? null,
+      isbn10: normalized.isbn10 ?? null,
+      seriesId: null,
+    });
+    logger.info(SCOPE, "upsertBook: post-insert series backfill attempt", {
+      bookId: id,
+      title: normalized.title,
+      backfilledViaIsbnLookup: backfilled,
+    });
+  }
+
   return id;
 }
 
@@ -237,10 +292,26 @@ export async function deleteUserBookAction(userBookId: string) {
 export async function refreshBookFromSourceAction(bookId: string) {
   await mustGetUser();
   const existing = await db.query.book.findFirst({ where: eq(book.id, bookId) });
-  if (!existing?.isbn13 && !existing?.isbn10) return;
+  if (!existing?.isbn13 && !existing?.isbn10) {
+    logger.warn(SCOPE, "refreshBookFromSourceAction: no ISBN, cannot refresh", {
+      bookId,
+      title: existing?.title ?? null,
+    });
+    return;
+  }
+
+  logger.info(SCOPE, "refreshBookFromSourceAction started", {
+    bookId,
+    title: existing.title,
+    isbn: existing.isbn13 ?? existing.isbn10,
+    hadSeriesAlready: !!existing.seriesId,
+  });
 
   const fresh = await lookupByIsbn(existing.isbn13 ?? existing.isbn10!);
-  if (!fresh) return;
+  if (!fresh) {
+    logger.warn(SCOPE, "refreshBookFromSourceAction: lookup found nothing", { bookId });
+    return;
+  }
 
   const seriesId =
     !existing.seriesId && fresh.seriesName
@@ -266,6 +337,12 @@ export async function refreshBookFromSourceAction(bookId: string) {
       updatedAt: new Date(),
     })
     .where(eq(book.id, bookId));
+
+  logger.info(SCOPE, "refreshBookFromSourceAction completed", {
+    bookId,
+    fetchedSeriesName: fresh.seriesName ?? null,
+    seriesLinkedAfter: !!seriesId,
+  });
 
   revalidatePath("/shelf");
   revalidatePath("/series");
@@ -325,6 +402,13 @@ export async function addMissingSeriesBooksToWishlistAction(
     await addBookAction(candidate, "wishlist");
     added++;
   }
+
+  logger.info(SCOPE, "addMissingSeriesBooksToWishlistAction completed", {
+    seriesName,
+    totalFound: found.length,
+    matchedThisSeries: inSeries.length,
+    added,
+  });
 
   revalidatePath("/series");
   revalidatePath("/wishlist");

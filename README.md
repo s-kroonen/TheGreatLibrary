@@ -114,7 +114,19 @@ A free key (no billing required for normal usage) fixes that:
 | `npm run lint` | ESLint |
 | `npm run db:push` | Push `db/schema.ts` to the database |
 | `npm run verify:google-books` | Check whether `GOOGLE_BOOKS_API_KEY` is set and working against the real API |
+| `npm run inspect:book -- "Title" "Author"` | Dump the raw Google Books + Open Library API responses for a title — what series-related fields they actually returned, not what we assume they return. Useful when a book isn't getting linked to its series; run it wherever you have real network access |
 | `npx tsx scripts/backfill-series.ts` | Re-link any book missing its series (runs automatically on every deploy — see below) |
+
+### Diagnosing search / series issues
+
+Every search request, provider timeout, and series-detection decision is
+logged (see `lib/logger.ts`) — check `docker logs` / Portainer's log
+viewer for lines tagged `[search]`, `[provider:google]`,
+`[provider:openlibrary]`, `[series-sync]`, and `[actions]`. For a book
+that isn't linking to its series, the fastest path is: open its detail
+page, hit **Refresh from source**, then check the logs for that book's
+ID — they'll show exactly what each provider returned and why a series
+link was or wasn't made.
 
 ## Deploying
 

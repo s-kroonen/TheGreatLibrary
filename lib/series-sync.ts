@@ -5,15 +5,22 @@ import { db } from "@/db";
 import { book, series, type SeriesVolume } from "@/db/schema";
 import { discoverSeriesVolumes } from "@/lib/books/series-lookup";
 import { lookupByIsbn } from "@/lib/books/search";
+import { logger } from "@/lib/logger";
+
+const SCOPE = "series-sync";
 
 export async function findOrCreateSeries(name: string): Promise<string> {
   const existing = await db.query.series.findFirst({
     where: ilike(series.name, name),
   });
-  if (existing) return existing.id;
+  if (existing) {
+    logger.info(SCOPE, "matched existing series", { name, seriesId: existing.id });
+    return existing.id;
+  }
 
   const id = nanoid();
   await db.insert(series).values({ id, name });
+  logger.info(SCOPE, "created new series", { name, seriesId: id });
   return id;
 }
 
@@ -26,12 +33,25 @@ export async function findOrCreateSeries(name: string): Promise<string> {
 export async function backfillBookSeriesByIsbn(
   bookRow: { id: string; isbn13: string | null; isbn10: string | null; seriesId: string | null }
 ): Promise<boolean> {
-  if (bookRow.seriesId) return false;
+  if (bookRow.seriesId) {
+    logger.info(SCOPE, "backfill skipped, already linked", { bookId: bookRow.id });
+    return false;
+  }
   const isbn = bookRow.isbn13 ?? bookRow.isbn10;
-  if (!isbn) return false;
+  if (!isbn) {
+    logger.warn(SCOPE, "backfill skipped, no ISBN to look up", { bookId: bookRow.id });
+    return false;
+  }
 
   const fresh = await lookupByIsbn(isbn);
-  if (!fresh?.seriesName) return false;
+  if (!fresh?.seriesName) {
+    logger.warn(SCOPE, "backfill found no series from any provider", {
+      bookId: bookRow.id,
+      isbn,
+      lookupSucceeded: !!fresh,
+    });
+    return false;
+  }
 
   const seriesId = await findOrCreateSeries(fresh.seriesName);
   await db
@@ -43,6 +63,12 @@ export async function backfillBookSeriesByIsbn(
     })
     .where(eq(book.id, bookRow.id));
 
+  logger.info(SCOPE, "backfilled series link", {
+    bookId: bookRow.id,
+    isbn,
+    seriesName: fresh.seriesName,
+    seriesPosition: fresh.seriesPosition ?? null,
+  });
   return true;
 }
 
@@ -57,7 +83,14 @@ export async function ensureSeriesLineup(
   name: string,
   current: { knownVolumes: SeriesVolume[] | null; lookedUpAt: Date | null }
 ): Promise<SeriesVolume[]> {
-  if (current.lookedUpAt) return current.knownVolumes ?? [];
+  if (current.lookedUpAt) {
+    logger.info(SCOPE, "lineup cache hit", {
+      seriesId,
+      name,
+      cachedVolumeCount: current.knownVolumes?.length ?? 0,
+    });
+    return current.knownVolumes ?? [];
+  }
 
   const volumes = await discoverSeriesVolumes(name);
   const expectedCount = volumes.length
@@ -72,6 +105,14 @@ export async function ensureSeriesLineup(
       lookedUpAt: new Date(),
     })
     .where(eq(series.id, seriesId));
+
+  logger.info(SCOPE, "lineup discovered and cached", {
+    seriesId,
+    name,
+    volumesFound: volumes.length,
+    expectedCount,
+    positions: volumes.map((v) => v.position),
+  });
 
   return volumes;
 }
