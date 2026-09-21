@@ -27,7 +27,7 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
 
   function handleAddMissing() {
     startTransition(async () => {
-      const added = await addMissingSeriesBooksToWishlistAction(series.name);
+      const added = await addMissingSeriesBooksToWishlistAction(series.id);
       toast.success(
         added > 0
           ? `Added ${added} missing book${added > 1 ? "s" : ""} to your wishlist`

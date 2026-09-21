@@ -28,6 +28,8 @@ export async function getSeriesOverview(userId: string) {
     {
       name: string;
       expectedCount: number | null;
+      source: string | null;
+      sourceId: string | null;
       knownVolumes: (typeof seriesTable.$inferSelect)["knownVolumes"];
       lookedUpAt: Date | null;
       books: UserBookWithBook[];
@@ -41,6 +43,8 @@ export async function getSeriesOverview(userId: string) {
       bySeries.set(s.id, {
         name: s.name,
         expectedCount: s.expectedCount,
+        source: s.source,
+        sourceId: s.sourceId,
         knownVolumes: s.knownVolumes,
         lookedUpAt: s.lookedUpAt,
         books: [],
@@ -59,6 +63,8 @@ export async function getSeriesOverview(userId: string) {
       // only ever be inferred from what the user happens to already own,
       // so owning just book 1 of 5 would never show books 2-5 as missing.
       const knownVolumes = await ensureSeriesLineup(id, data.name, {
+        source: data.source,
+        sourceId: data.sourceId,
         knownVolumes: data.knownVolumes,
         lookedUpAt: data.lookedUpAt,
       });
