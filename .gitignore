@@ -37,6 +37,12 @@ yarn-error.log*
 # vercel
 .vercel
 
+# JetBrains IDEs (WebStorm, etc.) — ignore personal workspace state, but
+# keep shared run configurations so they show up for everyone
+.idea/*
+!.idea/runConfigurations
+.vscode/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
