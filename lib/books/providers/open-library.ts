@@ -52,6 +52,98 @@ function normalize(doc: OpenLibraryDoc): NormalizedBook {
 
 const BASE_URL = "https://openlibrary.org";
 
+interface OpenLibraryWork {
+  series?: Array<{ series?: { key?: string }; key?: string; position?: string }>;
+}
+
+interface OpenLibrarySeriesEntity {
+  name?: string;
+}
+
+/**
+ * Open Library's search index doesn't reliably carry the `series` field
+ * (confirmed by direct inspection — see scripts/inspect-book.ts), but the
+ * Work-level record often has a `series` membership referencing a separate
+ * Series entity (`/series/{key}`) that DOES carry a human-readable `name`.
+ * Only worth the extra round-trips when we don't already have a series
+ * name from a cheaper source (title parsing / search doc's own field).
+ */
+async function resolveSeriesFromWork(
+  workKey: string
+): Promise<{ seriesName: string; seriesPosition?: number } | null> {
+  const start = Date.now();
+  try {
+    const workRes = await fetch(`${BASE_URL}${workKey}.json`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!workRes.ok) {
+      logger.warn(SCOPE, "work-level lookup failed", {
+        workKey,
+        status: workRes.status,
+        durationMs: Date.now() - start,
+      });
+      return null;
+    }
+
+    const work = (await workRes.json()) as OpenLibraryWork;
+    const membership = work.series?.[0];
+    const seriesKey = membership?.series?.key ?? membership?.key;
+    if (!seriesKey) {
+      logger.info(SCOPE, "work has no series membership", {
+        workKey,
+        durationMs: Date.now() - start,
+      });
+      return null;
+    }
+
+    const seriesRes = await fetch(`${BASE_URL}${seriesKey}.json`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!seriesRes.ok) {
+      logger.warn(SCOPE, "series entity lookup failed", {
+        workKey,
+        seriesKey,
+        status: seriesRes.status,
+        durationMs: Date.now() - start,
+      });
+      return null;
+    }
+
+    const seriesEntity = (await seriesRes.json()) as OpenLibrarySeriesEntity;
+    const durationMs = Date.now() - start;
+    if (!seriesEntity.name) {
+      logger.warn(SCOPE, "series entity has no name", {
+        workKey,
+        seriesKey,
+        durationMs,
+      });
+      return null;
+    }
+
+    const position = membership?.position ? Number(membership.position) : undefined;
+    logger.info(SCOPE, "resolved series via work-level lookup", {
+      workKey,
+      seriesKey,
+      seriesName: seriesEntity.name,
+      seriesPosition: position,
+      durationMs,
+    });
+    return {
+      seriesName: seriesEntity.name,
+      seriesPosition: Number.isFinite(position) ? position : undefined,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - start;
+    const isTimeout = err instanceof Error && err.name === "TimeoutError";
+    logger.warn(SCOPE, isTimeout ? "work-level lookup timed out" : "work-level lookup errored", {
+      workKey,
+      durationMs,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 export const openLibraryProvider: BookProvider = {
   name: "openlibrary",
 
@@ -124,13 +216,31 @@ export const openLibraryProvider: BookProvider = {
 
       const data = (await res.json()) as { docs?: OpenLibraryDoc[] };
       const first = data.docs?.[0];
-      const result = first ? normalize(first) : null;
+      let result = first ? normalize(first) : null;
+
+      // The search index rarely carries `series` directly — fall back to
+      // the Work-level lookup before giving up, so a book like "Icebreaker"
+      // (no series signal from either the title or the search doc) still
+      // gets linked. Only worth the extra round-trips when we don't
+      // already have a name from a cheaper source.
+      if (result && !result.seriesName && first?.key) {
+        const viaWork = await resolveSeriesFromWork(first.key);
+        if (viaWork) {
+          result = { ...result, ...viaWork };
+        }
+      }
+
       logger.info(SCOPE, "lookupByIsbn ok", {
         isbn,
         durationMs,
         found: !!result,
         rawSeriesField: first?.series?.[0] ?? null,
         seriesName: result?.seriesName ?? null,
+        seriesSource: result?.seriesName
+          ? first?.series?.[0]
+            ? "search-doc-field"
+            : "work-level-lookup"
+          : null,
       });
       return result;
     } catch (err) {
