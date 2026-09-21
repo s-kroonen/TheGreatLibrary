@@ -82,6 +82,7 @@ A free key (no billing required for normal usage) fixes that:
 | `npm run build` | Production build |
 | `npm run lint` | ESLint |
 | `npm run db:push` | Push `db/schema.ts` to the database |
+| `npm run verify:google-books` | Check whether `GOOGLE_BOOKS_API_KEY` is set and working against the real API |
 | `npx tsx scripts/backfill-series.ts` | Re-link any book missing its series (runs automatically on every deploy — see below) |
 
 ## Deploying
