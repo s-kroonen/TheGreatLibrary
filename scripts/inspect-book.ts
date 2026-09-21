@@ -95,7 +95,30 @@ async function inspectOpenLibrary() {
       try {
         const workRes = await fetch(`https://openlibrary.org${doc.key}.json`);
         const work = (await readJsonSafe(workRes)) as Record<string, unknown>;
-        console.log("work-level record has 'series' key:", "series" in work, work.series ?? null);
+        const rawSeries = work.series ?? null;
+        console.log("work-level record has 'series' key:", "series" in work, JSON.stringify(rawSeries));
+
+        // The Work-level `series` field, when present, has been observed as
+        // an array of memberships like [{ series: { key: '/series/OL...L' }, position: '1' }].
+        // Resolve each referenced series key to see what a human-readable
+        // name actually looks like — nothing downstream of us has ever
+        // fetched this entity before, so don't assume its shape.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- diagnostic script, not production data flow
+        const memberships = (Array.isArray(rawSeries) ? rawSeries : rawSeries ? [rawSeries] : []) as any[];
+        for (const membership of memberships) {
+          const seriesKey: string | undefined = membership?.series?.key ?? membership?.key;
+          if (!seriesKey) {
+            console.log("  membership has no resolvable series key:", JSON.stringify(membership));
+            continue;
+          }
+          try {
+            const seriesRes = await fetch(`https://openlibrary.org${seriesKey}.json`);
+            const seriesEntity = await readJsonSafe(seriesRes);
+            console.log(`  series entity ${seriesKey}:`, JSON.stringify(seriesEntity, null, 2));
+          } catch (err) {
+            console.log(`  series entity lookup failed for ${seriesKey}:`, err instanceof Error ? err.message : err);
+          }
+        }
       } catch (err) {
         console.log("work-level lookup failed:", err instanceof Error ? err.message : err);
       }
