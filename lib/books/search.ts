@@ -1,6 +1,9 @@
 import type { NormalizedBook } from "./types";
 import { googleBooksProvider } from "./providers/google-books";
 import { openLibraryProvider } from "./providers/open-library";
+import { logger } from "@/lib/logger";
+
+const SCOPE = "search";
 
 const providers = [googleBooksProvider, openLibraryProvider];
 
@@ -26,17 +29,24 @@ function mergeInto(
   }
 }
 
+/** Races a provider promise against a grace-period timeout. Reports
+ * which one actually won, so callers can log whether the slow provider's
+ * results were dropped for taking too long. */
 async function raceWithGrace(
   promise: Promise<NormalizedBook[]>,
   graceMs: number
-): Promise<NormalizedBook[]> {
-  const timeout = new Promise<NormalizedBook[]>((resolve) =>
-    setTimeout(() => resolve([]), graceMs)
+): Promise<{ books: NormalizedBook[]; droppedByGrace: boolean }> {
+  const timeout = new Promise<{ books: NormalizedBook[]; droppedByGrace: boolean }>(
+    (resolve) =>
+      setTimeout(() => resolve({ books: [], droppedByGrace: true }), graceMs)
   );
   try {
-    return await Promise.race([promise, timeout]);
+    return await Promise.race([
+      promise.then((books) => ({ books, droppedByGrace: false })),
+      timeout,
+    ]);
   } catch {
-    return [];
+    return { books: [], droppedByGrace: false };
   }
 }
 
@@ -45,7 +55,7 @@ async function searchOnce(query: string, limit: number) {
   // own internal timeout is the real ceiling). Open Library gets a
   // shorter grace period so a slow response there can't drag the whole
   // search down to it.
-  const [googleResults, openLibraryResults] = await Promise.all([
+  const [googleResults, openLibraryOutcome] = await Promise.all([
     googleBooksProvider.search(query, limit).catch(() => []),
     raceWithGrace(
       openLibraryProvider.search(query, limit).catch(() => []),
@@ -53,9 +63,16 @@ async function searchOnce(query: string, limit: number) {
     ),
   ]);
 
+  if (openLibraryOutcome.droppedByGrace) {
+    logger.warn(SCOPE, "open library dropped by grace period", {
+      query,
+      graceMs: SLOW_PROVIDER_GRACE_MS,
+    });
+  }
+
   const merged = new Map<string, NormalizedBook>();
   mergeInto(merged, googleResults);
-  mergeInto(merged, openLibraryResults);
+  mergeInto(merged, openLibraryOutcome.books);
   return merged;
 }
 
@@ -83,27 +100,51 @@ export async function searchBooks(
   const trimmed = query.trim();
   if (!trimmed) return [];
 
+  const start = Date.now();
   const merged = await searchOnce(trimmed, limit);
 
+  let usedFuzzyRetry = false;
   if (merged.size === 0) {
     const relaxed = collapseRepeatedLetters(trimmed);
     if (relaxed !== trimmed) {
+      usedFuzzyRetry = true;
+      logger.info(SCOPE, "no results, retrying with repeated letters collapsed", {
+        original: trimmed,
+        relaxed,
+      });
       const retried = await searchOnce(relaxed, limit);
       mergeInto(merged, Array.from(retried.values()));
     }
   }
 
-  return Array.from(merged.values()).slice(0, limit);
+  const results = Array.from(merged.values()).slice(0, limit);
+  logger.info(SCOPE, "search complete", {
+    query: trimmed,
+    durationMs: Date.now() - start,
+    resultCount: results.length,
+    usedFuzzyRetry,
+    seriesDetected: results.filter((b) => b.seriesName).length,
+  });
+
+  return results;
 }
 
 export async function lookupByIsbn(isbn: string): Promise<NormalizedBook | null> {
   for (const provider of providers) {
     try {
       const book = await provider.lookupByIsbn(isbn);
-      if (book) return book;
+      if (book) {
+        logger.info(SCOPE, "lookupByIsbn resolved", {
+          isbn,
+          provider: provider.name,
+          seriesName: book.seriesName ?? null,
+        });
+        return book;
+      }
     } catch {
       // try next provider
     }
   }
+  logger.warn(SCOPE, "lookupByIsbn found nothing from any provider", { isbn });
   return null;
 }

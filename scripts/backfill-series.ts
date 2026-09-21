@@ -13,6 +13,9 @@ import { and, isNull, or, isNotNull } from "drizzle-orm";
 import { db } from "../db";
 import { book } from "../db/schema";
 import { backfillBookSeriesByIsbn } from "../lib/series-sync";
+import { logger } from "../lib/logger";
+
+const SCOPE = "backfill-series";
 
 async function main() {
   const orphaned = await db.query.book.findMany({
@@ -23,28 +26,39 @@ async function main() {
   });
 
   if (orphaned.length === 0) {
-    console.log("[backfill-series] nothing to do");
+    logger.info(SCOPE, "nothing to do");
     return;
   }
 
-  console.log(`[backfill-series] checking ${orphaned.length} book(s) for a missing series link...`);
+  logger.info(SCOPE, "checking books for a missing series link", {
+    candidateCount: orphaned.length,
+  });
 
   let fixed = 0;
   for (const b of orphaned) {
     try {
       if (await backfillBookSeriesByIsbn(b)) fixed++;
     } catch (err) {
-      console.error(`[backfill-series] failed for book ${b.id}:`, err);
+      logger.error(SCOPE, "failed for book", {
+        bookId: b.id,
+        title: b.title,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
-  console.log(`[backfill-series] linked ${fixed} book(s) to a series`);
+  logger.info(SCOPE, "run complete", {
+    checked: orphaned.length,
+    linked: fixed,
+  });
 }
 
 main()
   .then(() => process.exit(0))
   .catch((err) => {
-    console.error("[backfill-series] fatal error:", err);
+    logger.error(SCOPE, "fatal error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
     // Don't block app startup over this — it's a best-effort enhancement.
     process.exit(0);
   });
