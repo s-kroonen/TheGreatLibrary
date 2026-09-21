@@ -69,7 +69,9 @@ async function inspectOpenLibrary() {
   const params = new URLSearchParams({
     q: query,
     limit: "3",
-    fields: "key,title,author_name,series",
+    // `series` is null on real records; the index's actual series fields
+    // are series_key / series_name / series_position.
+    fields: "key,title,author_name,isbn,series,series_key,series_name,series_position",
   });
   const res = await fetch(`https://openlibrary.org/search.json?${params.toString()}`);
   const data = (await readJsonSafe(res)) as { docs?: unknown[] };
@@ -83,76 +85,38 @@ async function inspectOpenLibrary() {
   const docs = (data.docs ?? []) as any[];
   console.log(`${docs.length} result(s) for "${query}"\n`);
 
+  const seenSeries = new Set<string>();
   for (const doc of docs) {
     console.log(`--- ${doc.title ?? "(no title)"} ---`);
     console.log("key:", doc.key);
     console.log("author_name:", doc.author_name ?? null);
-    console.log("series field:", JSON.stringify(doc.series ?? null));
+    console.log("isbn count:", doc.isbn?.length ?? 0);
+    console.log("legacy `series` field:", JSON.stringify(doc.series ?? null));
+    console.log(
+      "series_key / series_name / series_position:",
+      JSON.stringify([doc.series_key ?? null, doc.series_name ?? null, doc.series_position ?? null])
+    );
 
-    // Also check the Work-level record, in case series info lives there
-    // instead of (or in addition to) the search index doc.
-    if (doc.key) {
-      try {
-        const workRes = await fetch(`https://openlibrary.org${doc.key}.json`);
-        const work = (await readJsonSafe(workRes)) as Record<string, unknown>;
-        const rawSeries = work.series ?? null;
-        console.log("work-level record has 'series' key:", "series" in work, JSON.stringify(rawSeries));
-
-        // The Work-level `series` field, when present, has been observed as
-        // an array of memberships like [{ series: { key: '/series/OL...L' }, position: '1' }].
-        // Resolve each referenced series key to see what a human-readable
-        // name actually looks like — nothing downstream of us has ever
-        // fetched this entity before, so don't assume its shape.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- diagnostic script, not production data flow
-        const memberships = (Array.isArray(rawSeries) ? rawSeries : rawSeries ? [rawSeries] : []) as any[];
-        for (const membership of memberships) {
-          const seriesKey: string | undefined = membership?.series?.key ?? membership?.key;
-          if (!seriesKey) {
-            console.log("  membership has no resolvable series key:", JSON.stringify(membership));
-            continue;
-          }
-          try {
-            const seriesRes = await fetch(`https://openlibrary.org${seriesKey}.json`);
-            const seriesEntity = (await readJsonSafe(seriesRes)) as Record<string, unknown>;
-            console.log(`  series entity ${seriesKey}:`, JSON.stringify(seriesEntity, null, 2));
-
-            // The series entity carries a "seeds" link — check whether that
-            // actually enumerates the series' member works, which would be
-            // a far more reliable way to discover a series' full lineup
-            // than re-searching by series name and hoping titles/positions
-            // parse out correctly (confirmed unreliable: searching "Maple
-            // Hills" by keyword misses "Icebreaker" entirely, since the
-            // series name isn't in that book's title).
-            const seedsPath = (seriesEntity.links as { seeds?: string } | undefined)?.seeds;
-            if (seedsPath) {
-              try {
-                const seedsRes = await fetch(`https://openlibrary.org${seedsPath}.json`);
-                const seedsData = await readJsonSafe(seedsRes);
-                console.log(`  seeds entity ${seedsPath}:`, JSON.stringify(seedsData, null, 2));
-              } catch (err) {
-                console.log(`  seeds lookup failed for ${seedsPath}:`, err instanceof Error ? err.message : err);
-              }
-
-              // Also try the plain (non-.json) seeds URL in case the .json
-              // suffix isn't how this particular endpoint is addressed.
-              try {
-                const seedsRawRes = await fetch(`https://openlibrary.org${seedsPath}`, {
-                  headers: { Accept: "application/json" },
-                });
-                const seedsRaw = await readJsonSafe(seedsRawRes);
-                console.log(`  seeds entity (no .json) ${seedsPath}:`, JSON.stringify(seedsRaw, null, 2));
-              } catch (err) {
-                console.log(`  seeds (no .json) lookup failed for ${seedsPath}:`, err instanceof Error ? err.message : err);
-              }
-            } else {
-              console.log("  series entity has no 'seeds' link");
-            }
-          } catch (err) {
-            console.log(`  series entity lookup failed for ${seriesKey}:`, err instanceof Error ? err.message : err);
-          }
-        }
-      } catch (err) {
-        console.log("work-level lookup failed:", err instanceof Error ? err.message : err);
+    // Enumerating the whole series: the Series entity's own `seeds` link
+    // does NOT work (seed_count 0; .json 500s, plain URL 404s — verified),
+    // but the search index carries series_key on every member work, so
+    // this returns the full lineup with positions in one request.
+    for (const seriesKey of (doc.series_key ?? []) as string[]) {
+      if (seenSeries.has(seriesKey)) continue;
+      seenSeries.add(seriesKey);
+      const lineupParams = new URLSearchParams({
+        q: `series_key:${seriesKey}`,
+        limit: "100",
+        fields: "key,title,series_key,series_position,edition_count",
+      });
+      const lineupRes = await fetch(`https://openlibrary.org/search.json?${lineupParams.toString()}`);
+      const lineup = (await readJsonSafe(lineupRes)) as { numFound?: number; docs?: unknown[] };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- diagnostic script, not production data flow
+      const members = (lineup.docs ?? []) as any[];
+      console.log(`  series ${seriesKey} lineup (numFound ${lineup.numFound}):`);
+      for (const m of members) {
+        const i = (m.series_key ?? []).indexOf(seriesKey);
+        console.log(`    #${m.series_position?.[i] ?? "?"}  ${m.title}  (${m.key}, ${m.edition_count} editions)`);
       }
     }
     console.log();

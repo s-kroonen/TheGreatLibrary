@@ -71,6 +71,12 @@ export interface SeriesVolume {
   coverUrl?: string;
   isbn13?: string;
   isbn10?: string;
+  /** Which provider `sourceId` belongs to (Open Library work "/works/OL…W",
+   * or a Google Books volume id), plus authors — enough to turn a lineup
+   * entry back into a book we can add to a wishlist. */
+  source?: "openlibrary" | "googlebooks";
+  sourceId?: string;
+  authors?: string[];
 }
 
 export const series = pgTable(
@@ -116,6 +122,10 @@ export const book = pgTable(
       onDelete: "set null",
     }),
     seriesPosition: numeric("series_position"),
+    // When a series lookup last ran for this book without finding one, so
+    // the startup backfill doesn't re-query every standalone book on every
+    // boot.
+    seriesCheckedAt: timestamp("series_checked_at"),
 
     source: text("source"), // "openlibrary" | "googlebooks" | "manual"
     sourceId: text("source_id"),

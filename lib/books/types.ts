@@ -19,6 +19,10 @@ export interface NormalizedBook {
   /** Best-effort series info parsed from the source, if any. */
   seriesName?: string;
   seriesPosition?: number;
+  /** Open Library's id for the series (e.g. "OL330994L"), when the source
+   * gave one. Lets us enumerate the series' full lineup exactly instead of
+   * re-guessing it by name. */
+  seriesKey?: string;
 }
 
 export interface BookProvider {

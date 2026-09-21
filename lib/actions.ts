@@ -7,6 +7,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import {
   book,
+  series,
   userBook,
   wishlistShare,
   type UserBookStatus,
@@ -14,7 +15,7 @@ import {
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { getGoogleBooksPrice } from "@/lib/books/price";
-import { findOrCreateSeries, backfillBookSeriesByIsbn } from "@/lib/series-sync";
+import { findOrCreateSeries, backfillBookSeries, ensureSeriesLineup } from "@/lib/series-sync";
 import { logger } from "@/lib/logger";
 import type { NormalizedBook } from "@/lib/books/types";
 
@@ -74,7 +75,7 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
     // on first insert, so re-adding/re-searching an existing book can
     // fix it retroactively instead of leaving it orphaned forever.
     if (!existing.seriesId && normalized.seriesName) {
-      const seriesId = await findOrCreateSeries(normalized.seriesName);
+      const seriesId = await findOrCreateSeries(normalized.seriesName, normalized.seriesKey);
       await db
         .update(book)
         .set({
@@ -94,8 +95,10 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
       // still find one — the same fallback "Refresh from source" uses.
       const isbn = existing.isbn13 ?? existing.isbn10;
       const backfilled = isbn
-        ? await backfillBookSeriesByIsbn({
+        ? await backfillBookSeries({
             id: existing.id,
+            title: existing.title,
+            authors: existing.authors,
             isbn13: existing.isbn13,
             isbn10: existing.isbn10,
             seriesId: existing.seriesId,
@@ -113,7 +116,7 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
 
   let seriesId: string | null = null;
   if (normalized.seriesName) {
-    seriesId = await findOrCreateSeries(normalized.seriesName);
+    seriesId = await findOrCreateSeries(normalized.seriesName, normalized.seriesKey);
   } else {
     logger.info(SCOPE, "upsertBook: no series detected on new book", {
       title: normalized.title,
@@ -147,8 +150,10 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
   // search result had no series signal, but a deeper ISBN lookup might.
   // One extra lookup for the book just added, not for every search result.
   if (!seriesId && (normalized.isbn13 ?? normalized.isbn10)) {
-    const backfilled = await backfillBookSeriesByIsbn({
+    const backfilled = await backfillBookSeries({
       id,
+      title: normalized.title,
+      authors: normalized.authors,
       isbn13: normalized.isbn13 ?? null,
       isbn10: normalized.isbn10 ?? null,
       seriesId: null,
@@ -315,7 +320,7 @@ export async function refreshBookFromSourceAction(bookId: string) {
 
   const seriesId =
     !existing.seriesId && fresh.seriesName
-      ? await findOrCreateSeries(fresh.seriesName)
+      ? await findOrCreateSeries(fresh.seriesName, fresh.seriesKey)
       : existing.seriesId;
 
   await db
@@ -373,40 +378,68 @@ export async function checkCurrentPriceAction(userBookId: string) {
   return price;
 }
 
-/** Adds every book found for a series (via search) that the user doesn't
- * already have, straight to their wishlist. */
-export async function addMissingSeriesBooksToWishlistAction(
-  seriesName: string
-) {
+/** Adds every volume of a series (from its discovered lineup) that the
+ * user doesn't already have to their wishlist. Volumes are matched to the
+ * user's books by series position, the same way the series page counts
+ * what's missing. */
+export async function addMissingSeriesBooksToWishlistAction(seriesId: string) {
   const user = await mustGetUser();
-  const found = await searchBooks(seriesName, 40);
-  const inSeries = found.filter(
-    (b) => b.seriesName?.toLowerCase() === seriesName.toLowerCase()
-  );
+  const seriesRow = await db.query.series.findFirst({ where: eq(series.id, seriesId) });
+  if (!seriesRow) return 0;
 
+  const lineup = await ensureSeriesLineup(seriesRow.id, seriesRow.name, {
+    source: seriesRow.source,
+    sourceId: seriesRow.sourceId,
+    knownVolumes: seriesRow.knownVolumes,
+    lookedUpAt: seriesRow.lookedUpAt,
+  });
+
+  const library = await db.query.userBook.findMany({
+    where: eq(userBook.userId, user.id),
+    with: { book: true },
+  });
+  const heldPositions = new Set(
+    library
+      .filter((ub) => ub.book.seriesId === seriesId && ub.book.seriesPosition !== null)
+      .map((ub) => Number(ub.book.seriesPosition))
+  );
   const ownedIsbns = new Set(
-    (
-      await db.query.userBook.findMany({
-        where: eq(userBook.userId, user.id),
-        with: { book: true },
-      })
-    )
-      .map((ub) => ub.book.isbn13 ?? ub.book.isbn10)
-      .filter(Boolean)
+    library.flatMap((ub) => [ub.book.isbn13, ub.book.isbn10]).filter(Boolean)
   );
 
   let added = 0;
-  for (const candidate of inSeries) {
-    const isbn = candidate.isbn13 ?? candidate.isbn10;
-    if (isbn && ownedIsbns.has(isbn)) continue;
-    await addBookAction(candidate, "wishlist");
+  for (const volume of lineup) {
+    if (heldPositions.has(volume.position)) continue;
+    if (
+      (volume.isbn13 && ownedIsbns.has(volume.isbn13)) ||
+      (volume.isbn10 && ownedIsbns.has(volume.isbn10))
+    )
+      continue;
+    if (!volume.source || !volume.sourceId) continue;
+
+    await addBookAction(
+      {
+        source: volume.source,
+        sourceId: volume.sourceId,
+        title: volume.title,
+        authors: volume.authors ?? [],
+        isbn13: volume.isbn13,
+        isbn10: volume.isbn10,
+        coverUrl: volume.coverUrl,
+        genres: [],
+        seriesName: seriesRow.name,
+        seriesPosition: volume.position,
+        seriesKey: seriesRow.source === "openlibrary" ? (seriesRow.sourceId ?? undefined) : undefined,
+      },
+      "wishlist"
+    );
     added++;
   }
 
   logger.info(SCOPE, "addMissingSeriesBooksToWishlistAction completed", {
-    seriesName,
-    totalFound: found.length,
-    matchedThisSeries: inSeries.length,
+    seriesId,
+    seriesName: seriesRow.name,
+    lineupSize: lineup.length,
     added,
   });
 

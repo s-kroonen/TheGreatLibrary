@@ -1,6 +1,7 @@
 import type { NormalizedBook } from "./types";
 import { googleBooksProvider } from "./providers/google-books";
-import { openLibraryProvider } from "./providers/open-library";
+import { findOpenLibrarySeries, openLibraryProvider } from "./providers/open-library";
+import { mergeResults } from "./merge";
 import { logger } from "@/lib/logger";
 
 const SCOPE = "search";
@@ -12,22 +13,6 @@ const providers = [googleBooksProvider, openLibraryProvider];
 // whole search past this grace period. Its results are still merged in
 // if they land within it; whatever's still in flight after is dropped.
 const SLOW_PROVIDER_GRACE_MS = 1500;
-
-function dedupeKey(book: NormalizedBook): string {
-  if (book.isbn13) return `isbn:${book.isbn13}`;
-  if (book.isbn10) return `isbn:${book.isbn10}`;
-  return `title:${book.title.toLowerCase()}|${(book.authors[0] ?? "").toLowerCase()}`;
-}
-
-function mergeInto(
-  merged: Map<string, NormalizedBook>,
-  books: NormalizedBook[]
-) {
-  for (const book of books) {
-    const key = dedupeKey(book);
-    if (!merged.has(key)) merged.set(key, book);
-  }
-}
 
 /** Races a provider promise against a grace-period timeout. Reports
  * which one actually won, so callers can log whether the slow provider's
@@ -50,7 +35,7 @@ async function raceWithGrace(
   }
 }
 
-async function searchOnce(query: string, limit: number) {
+async function searchOnce(query: string, limit: number): Promise<NormalizedBook[]> {
   // Google Books is the fast, primary source — always wait for it (its
   // own internal timeout is the real ceiling). Open Library gets a
   // shorter grace period so a slow response there can't drag the whole
@@ -70,10 +55,10 @@ async function searchOnce(query: string, limit: number) {
     });
   }
 
-  const merged = new Map<string, NormalizedBook>();
-  mergeInto(merged, googleResults);
-  mergeInto(merged, openLibraryOutcome.books);
-  return merged;
+  // Open Library goes first in the interleave: measured against real
+  // queries it ranks the intended book first far more often for short or
+  // exact titles ("Dune"), and it's the one carrying series data.
+  return mergeResults(openLibraryOutcome.books, googleResults, limit);
 }
 
 /** Collapses runs of a repeated letter down to one, e.g. "harrry potter"
@@ -101,10 +86,10 @@ export async function searchBooks(
   if (!trimmed) return [];
 
   const start = Date.now();
-  const merged = await searchOnce(trimmed, limit);
+  let results = await searchOnce(trimmed, limit);
 
   let usedFuzzyRetry = false;
-  if (merged.size === 0) {
+  if (results.length === 0) {
     const relaxed = collapseRepeatedLetters(trimmed);
     if (relaxed !== trimmed) {
       usedFuzzyRetry = true;
@@ -112,12 +97,10 @@ export async function searchBooks(
         original: trimmed,
         relaxed,
       });
-      const retried = await searchOnce(relaxed, limit);
-      mergeInto(merged, Array.from(retried.values()));
+      results = await searchOnce(relaxed, limit);
     }
   }
 
-  const results = Array.from(merged.values()).slice(0, limit);
   logger.info(SCOPE, "search complete", {
     query: trimmed,
     durationMs: Date.now() - start,
@@ -129,22 +112,54 @@ export async function searchBooks(
   return results;
 }
 
+/**
+ * Resolves a book by ISBN. The first provider that knows the ISBN supplies
+ * the record, but that provider often can't say what series it's in —
+ * Google Books never does, and Open Library doesn't index every edition's
+ * ISBN. So when the record has no series, ask Open Library separately
+ * (by ISBN, then title + author) rather than stopping at the first hit.
+ */
 export async function lookupByIsbn(isbn: string): Promise<NormalizedBook | null> {
+  let found: NormalizedBook | null = null;
   for (const provider of providers) {
     try {
       const book = await provider.lookupByIsbn(isbn);
       if (book) {
-        logger.info(SCOPE, "lookupByIsbn resolved", {
-          isbn,
-          provider: provider.name,
-          seriesName: book.seriesName ?? null,
-        });
-        return book;
+        found = book;
+        break;
       }
     } catch {
       // try next provider
     }
   }
-  logger.warn(SCOPE, "lookupByIsbn found nothing from any provider", { isbn });
-  return null;
+
+  if (!found) {
+    logger.warn(SCOPE, "lookupByIsbn found nothing from any provider", { isbn });
+    return null;
+  }
+
+  if (!found.seriesName) {
+    const series = await findOpenLibrarySeries({
+      // Open Library was already asked for this ISBN if it was the source.
+      isbn: found.source === "openlibrary" ? undefined : isbn,
+      title: found.title,
+      authors: found.authors,
+    });
+    if (series) {
+      found = {
+        ...found,
+        seriesName: series.seriesName,
+        seriesPosition: series.seriesPosition,
+        seriesKey: series.seriesKey,
+      };
+    }
+  }
+
+  logger.info(SCOPE, "lookupByIsbn resolved", {
+    isbn,
+    provider: found.source,
+    seriesName: found.seriesName ?? null,
+    seriesKey: found.seriesKey ?? null,
+  });
+  return found;
 }
