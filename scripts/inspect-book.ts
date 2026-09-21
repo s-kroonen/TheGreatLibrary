@@ -113,8 +113,40 @@ async function inspectOpenLibrary() {
           }
           try {
             const seriesRes = await fetch(`https://openlibrary.org${seriesKey}.json`);
-            const seriesEntity = await readJsonSafe(seriesRes);
+            const seriesEntity = (await readJsonSafe(seriesRes)) as Record<string, unknown>;
             console.log(`  series entity ${seriesKey}:`, JSON.stringify(seriesEntity, null, 2));
+
+            // The series entity carries a "seeds" link — check whether that
+            // actually enumerates the series' member works, which would be
+            // a far more reliable way to discover a series' full lineup
+            // than re-searching by series name and hoping titles/positions
+            // parse out correctly (confirmed unreliable: searching "Maple
+            // Hills" by keyword misses "Icebreaker" entirely, since the
+            // series name isn't in that book's title).
+            const seedsPath = (seriesEntity.links as { seeds?: string } | undefined)?.seeds;
+            if (seedsPath) {
+              try {
+                const seedsRes = await fetch(`https://openlibrary.org${seedsPath}.json`);
+                const seedsData = await readJsonSafe(seedsRes);
+                console.log(`  seeds entity ${seedsPath}:`, JSON.stringify(seedsData, null, 2));
+              } catch (err) {
+                console.log(`  seeds lookup failed for ${seedsPath}:`, err instanceof Error ? err.message : err);
+              }
+
+              // Also try the plain (non-.json) seeds URL in case the .json
+              // suffix isn't how this particular endpoint is addressed.
+              try {
+                const seedsRawRes = await fetch(`https://openlibrary.org${seedsPath}`, {
+                  headers: { Accept: "application/json" },
+                });
+                const seedsRaw = await readJsonSafe(seedsRawRes);
+                console.log(`  seeds entity (no .json) ${seedsPath}:`, JSON.stringify(seedsRaw, null, 2));
+              } catch (err) {
+                console.log(`  seeds (no .json) lookup failed for ${seedsPath}:`, err instanceof Error ? err.message : err);
+              }
+            } else {
+              console.log("  series entity has no 'seeds' link");
+            }
           } catch (err) {
             console.log(`  series entity lookup failed for ${seriesKey}:`, err instanceof Error ? err.message : err);
           }
