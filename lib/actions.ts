@@ -2,12 +2,11 @@
 
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
-import { and, eq, ilike } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
   book,
-  series,
   userBook,
   wishlistShare,
   type UserBookStatus,
@@ -15,6 +14,7 @@ import {
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { getGoogleBooksPrice } from "@/lib/books/price";
+import { findOrCreateSeries } from "@/lib/series-sync";
 import type { NormalizedBook } from "@/lib/books/types";
 
 async function mustGetUser() {
@@ -50,17 +50,6 @@ export async function searchBooksAction(query: string): Promise<SearchResult[]> 
       (r.isbn10 && statusByIsbn.get(r.isbn10)) ||
       null,
   }));
-}
-
-async function findOrCreateSeries(name: string): Promise<string> {
-  const existing = await db.query.series.findFirst({
-    where: ilike(series.name, name),
-  });
-  if (existing) return existing.id;
-
-  const id = nanoid();
-  await db.insert(series).values({ id, name });
-  return id;
 }
 
 /** Upserts a normalized external book into the shared `book` table. */

@@ -1,7 +1,8 @@
 import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import { user, userBook, wishlistShare } from "@/db/schema";
+import { series as seriesTable, user, userBook, wishlistShare } from "@/db/schema";
+import { ensureSeriesLineup } from "@/lib/series-sync";
 
 export async function getUserBookById(userId: string, userBookId: string) {
   return db.query.userBook.findFirst({
@@ -24,7 +25,13 @@ export async function getSeriesOverview(userId: string) {
   const books = await getUserBooks(userId);
   const bySeries = new Map<
     string,
-    { name: string; expectedCount: number | null; books: UserBookWithBook[] }
+    {
+      name: string;
+      expectedCount: number | null;
+      knownVolumes: (typeof seriesTable.$inferSelect)["knownVolumes"];
+      lookedUpAt: Date | null;
+      books: UserBookWithBook[];
+    }
   >();
 
   for (const ub of books) {
@@ -34,56 +41,83 @@ export async function getSeriesOverview(userId: string) {
       bySeries.set(s.id, {
         name: s.name,
         expectedCount: s.expectedCount,
+        knownVolumes: s.knownVolumes,
+        lookedUpAt: s.lookedUpAt,
         books: [],
       });
     }
     bySeries.get(s.id)!.books.push(ub);
   }
 
-  return Array.from(bySeries.entries()).map(([id, data]) => {
-    const positionOf = (b: UserBookWithBook) =>
-      b.book.seriesPosition === null ? null : Number(b.book.seriesPosition);
+  return Promise.all(
+    Array.from(bySeries.entries()).map(async ([id, data]) => {
+      const positionOf = (b: UserBookWithBook) =>
+        b.book.seriesPosition === null ? null : Number(b.book.seriesPosition);
 
-    // "Have" = physically own it or have read/are reading/DNF'd it.
-    // Wishlisted volumes don't count toward completion — they're tracked
-    // separately so they can be badged instead of counted as missing.
-    const havePositions = data.books
-      .filter((b) => b.status !== "wishlist")
-      .map(positionOf)
-      .filter((p): p is number => p !== null);
+      // Discover the series' actual full lineup from external search
+      // (cached after the first lookup) — without this, "total" could
+      // only ever be inferred from what the user happens to already own,
+      // so owning just book 1 of 5 would never show books 2-5 as missing.
+      const knownVolumes = await ensureSeriesLineup(id, data.name, {
+        knownVolumes: data.knownVolumes,
+        lookedUpAt: data.lookedUpAt,
+      });
 
-    const wishlistPositions = new Set(
-      data.books
-        .filter((b) => b.status === "wishlist")
+      // "Have" = physically own it or have read/are reading/DNF'd it.
+      // Wishlisted volumes don't count toward completion — they're tracked
+      // separately so they can be badged instead of counted as missing.
+      const havePositions = data.books
+        .filter((b) => b.status !== "wishlist")
         .map(positionOf)
-        .filter((p): p is number => p !== null)
-    );
+        .filter((p): p is number => p !== null);
 
-    const allPositions = data.books
-      .map(positionOf)
-      .filter((p): p is number => p !== null);
-    const maxPosition = allPositions.length ? Math.max(...allPositions) : null;
-    const total = data.expectedCount ?? maxPosition;
+      const wishlistPositions = new Set(
+        data.books
+          .filter((b) => b.status === "wishlist")
+          .map(positionOf)
+          .filter((p): p is number => p !== null)
+      );
 
-    const missing: number[] = [];
-    if (total) {
-      const have = new Set(havePositions);
-      for (let i = 1; i <= total; i++) {
-        if (!have.has(i) && !wishlistPositions.has(i)) missing.push(i);
+      const allPositions = data.books
+        .map(positionOf)
+        .filter((p): p is number => p !== null);
+      const knownMax = knownVolumes.length
+        ? Math.max(...knownVolumes.map((v) => v.position))
+        : null;
+      const ownedMax = allPositions.length ? Math.max(...allPositions) : null;
+      const total = data.expectedCount ?? knownMax ?? ownedMax;
+
+      const volumeAt = new Map(knownVolumes.map((v) => [v.position, v]));
+      const missing: {
+        position: number;
+        title?: string;
+        coverUrl?: string;
+      }[] = [];
+      if (total) {
+        const have = new Set(havePositions);
+        for (let i = 1; i <= total; i++) {
+          if (have.has(i) || wishlistPositions.has(i)) continue;
+          const known = volumeAt.get(i);
+          missing.push({
+            position: i,
+            title: known?.title,
+            coverUrl: known?.coverUrl,
+          });
+        }
       }
-    }
 
-    return {
-      id,
-      name: data.name,
-      books: data.books.sort(
-        (a, b) => (positionOf(a) ?? 0) - (positionOf(b) ?? 0)
-      ),
-      total,
-      haveCount: new Set(havePositions).size,
-      missing,
-    };
-  });
+      return {
+        id,
+        name: data.name,
+        books: data.books.sort(
+          (a, b) => (positionOf(a) ?? 0) - (positionOf(b) ?? 0)
+        ),
+        total,
+        haveCount: new Set(havePositions).size,
+        missing,
+      };
+    })
+  );
 }
 
 export async function getWishlistShare(userId: string) {
