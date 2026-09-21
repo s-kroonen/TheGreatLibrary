@@ -23,3 +23,19 @@ export function parseSeriesFromTitle(
     seriesPosition: Number(position),
   };
 }
+
+/**
+ * Open Library indexes an explicit `series` field for a meaningful chunk
+ * of records (not parsed from the title) — formats seen in the wild
+ * include "Harry Potter", "Harry Potter ; 4", "Harry Potter #4", and
+ * "Harry Potter, book 4".
+ */
+export function parseSeriesField(
+  raw: string
+): { seriesName: string; seriesPosition?: number } {
+  const match = raw.match(/^(.*?)\s*(?:[;,#]|\bbook\b)\s*(\d+(?:\.\d+)?)$/i);
+  if (!match) return { seriesName: raw.trim() };
+
+  const [, name, position] = match;
+  return { seriesName: name.trim(), seriesPosition: Number(position) };
+}

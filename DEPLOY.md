@@ -19,6 +19,7 @@ pings a webhook to say "there's a new commit, rebuild now."
    - `BETTER_AUTH_SECRET` — a random 32+ byte string (e.g. `openssl rand -hex 32`).
    - `BETTER_AUTH_URL` — the public URL you'll reach the app at, e.g. `https://library.yourdomain.com`.
    - `APP_PORT` — the host port to publish (defaults to 3000 if unset).
+   - `GOOGLE_BOOKS_API_KEY` — optional but recommended (see below).
 3. Deploy the stack once manually to confirm it builds and starts.
 4. Open the stack → **Webhooks** → enable it → copy the webhook URL.
    This is a plain `POST` endpoint that tells Portainer: pull the repo again,
@@ -46,6 +47,25 @@ Add the webhook URL from step 4 as a repository secret:
 
 If `verify` fails (lint, type error, broken Dockerfile), the webhook is
 never called, so a broken commit can't take production down.
+
+## Getting a Google Books API key (recommended)
+
+Without a key, book search runs against Google's anonymous, per-IP quota,
+which is small and **shared with everyone else on that IP range** — not
+just this app. That's the actual cause of "I search the same title twice
+and it sometimes finds nothing": the quota got hit, not anything wrong
+with the query.
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/),
+   create a project (or reuse one) — no billing account required for this.
+2. **APIs & Services → Library** → enable **"Books API"**.
+3. **APIs & Services → Credentials → Create credentials → API key.**
+4. Optionally restrict the key to the Books API only.
+5. Set it as `GOOGLE_BOOKS_API_KEY` in the Portainer stack's environment
+   variables and redeploy.
+
+This moves the quota onto your own project, which is far higher and
+isn't shared with unrelated traffic.
 
 ## Database migrations
 
