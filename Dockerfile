@@ -31,12 +31,15 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Full node_modules (not just the standalone trace) so drizzle-kit push can
-# run from the entrypoint on boot — drizzle-kit isn't part of the runtime
-# trace since it's a dev dependency used only at startup, not by server.js.
+# Full node_modules (not just the standalone trace) so drizzle-kit push
+# and the backfill script can run from the entrypoint on boot — neither
+# is part of the runtime trace since they're not imported by server.js.
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=builder /app/db/schema.ts ./db/schema.ts
+COPY --from=builder /app/db ./db
+COPY --from=builder /app/lib ./lib
+COPY --from=builder /app/scripts/backfill-series.ts ./scripts/backfill-series.ts
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
 RUN chown -R nextjs:nodejs /app && chmod +x ./docker-entrypoint.sh

@@ -65,6 +65,14 @@ export const verification = pgTable("verification", {
 
 // ---------- Library domain ----------
 
+export interface SeriesVolume {
+  position: number;
+  title: string;
+  coverUrl?: string;
+  isbn13?: string;
+  isbn10?: string;
+}
+
 export const series = pgTable(
   "series",
   {
@@ -73,6 +81,13 @@ export const series = pgTable(
     source: text("source"),
     sourceId: text("source_id"),
     expectedCount: integer("expected_count"),
+    // The full lineup of the series as discovered from external search —
+    // not just what this app's users happen to own. Lets us show what's
+    // actually missing, not just "you have fewer books than your own max
+    // position." Re-looked-up lazily; lookedUpAt lets us treat a stale
+    // cache as unset without re-querying on every page load.
+    knownVolumes: jsonb("known_volumes").$type<SeriesVolume[]>(),
+    lookedUpAt: timestamp("looked_up_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [uniqueIndex("series_source_idx").on(t.source, t.sourceId)]

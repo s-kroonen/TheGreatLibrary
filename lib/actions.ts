@@ -2,12 +2,11 @@
 
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
-import { and, eq, ilike } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
   book,
-  series,
   userBook,
   wishlistShare,
   type UserBookStatus,
@@ -15,6 +14,7 @@ import {
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { getGoogleBooksPrice } from "@/lib/books/price";
+import { findOrCreateSeries } from "@/lib/series-sync";
 import type { NormalizedBook } from "@/lib/books/types";
 
 async function mustGetUser() {
@@ -52,17 +52,6 @@ export async function searchBooksAction(query: string): Promise<SearchResult[]> 
   }));
 }
 
-async function findOrCreateSeries(name: string): Promise<string> {
-  const existing = await db.query.series.findFirst({
-    where: ilike(series.name, name),
-  });
-  if (existing) return existing.id;
-
-  const id = nanoid();
-  await db.insert(series).values({ id, name });
-  return id;
-}
-
 /** Upserts a normalized external book into the shared `book` table. */
 async function upsertBook(normalized: NormalizedBook): Promise<string> {
   const existing = await db.query.book.findFirst({
@@ -71,7 +60,25 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
       eq(book.sourceId, normalized.sourceId)
     ),
   });
-  if (existing) return existing.id;
+  if (existing) {
+    // Series detection has improved over time (and depends on whichever
+    // provider happens to have the data), so a book added before that
+    // never got linked to its series. Backfill it here rather than only
+    // on first insert, so re-adding/re-searching an existing book can
+    // fix it retroactively instead of leaving it orphaned forever.
+    if (!existing.seriesId && normalized.seriesName) {
+      const seriesId = await findOrCreateSeries(normalized.seriesName);
+      await db
+        .update(book)
+        .set({
+          seriesId,
+          seriesPosition: normalized.seriesPosition?.toString(),
+          updatedAt: new Date(),
+        })
+        .where(eq(book.id, existing.id));
+    }
+    return existing.id;
+  }
 
   let seriesId: string | null = null;
   if (normalized.seriesName) {
@@ -235,6 +242,11 @@ export async function refreshBookFromSourceAction(bookId: string) {
   const fresh = await lookupByIsbn(existing.isbn13 ?? existing.isbn10!);
   if (!fresh) return;
 
+  const seriesId =
+    !existing.seriesId && fresh.seriesName
+      ? await findOrCreateSeries(fresh.seriesName)
+      : existing.seriesId;
+
   await db
     .update(book)
     .set({
@@ -247,11 +259,16 @@ export async function refreshBookFromSourceAction(bookId: string) {
       publishedDate: fresh.publishedDate ?? existing.publishedDate,
       pageCount: fresh.pageCount ?? existing.pageCount,
       genres: fresh.genres.length ? fresh.genres : existing.genres,
+      seriesId,
+      seriesPosition: seriesId
+        ? (fresh.seriesPosition?.toString() ?? existing.seriesPosition)
+        : existing.seriesPosition,
       updatedAt: new Date(),
     })
     .where(eq(book.id, bookId));
 
   revalidatePath("/shelf");
+  revalidatePath("/series");
 }
 
 export async function checkCurrentPriceAction(userBookId: string) {

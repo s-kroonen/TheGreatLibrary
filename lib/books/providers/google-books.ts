@@ -53,17 +53,30 @@ function normalize(volume: GoogleVolume): NormalizedBook {
 
 const BASE_URL = "https://www.googleapis.com/books/v1/volumes";
 
+/** Without an API key, Google Books enforces a low, shared, per-IP quota
+ * (not tied to this app specifically) — the cause of "works sometimes,
+ * finds nothing other times" under any real traffic. Setting
+ * GOOGLE_BOOKS_API_KEY (free, no billing required for normal usage — see
+ * DEPLOY.md) moves the quota onto your own project instead. */
+function withKey(params: URLSearchParams): URLSearchParams {
+  const key = process.env.GOOGLE_BOOKS_API_KEY;
+  if (key) params.set("key", key);
+  return params;
+}
+
 export const googleBooksProvider: BookProvider = {
   name: "googlebooks",
 
   async search(query, limit = 20) {
-    const params = new URLSearchParams({
-      q: query,
-      maxResults: String(Math.min(limit, 40)),
-    });
+    const params = withKey(
+      new URLSearchParams({
+        q: query,
+        maxResults: String(Math.min(limit, 40)),
+      })
+    );
     const res = await fetch(`${BASE_URL}?${params.toString()}`, {
       next: { revalidate: 3600 },
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(4000),
     });
     if (!res.ok) return [];
     const data = (await res.json()) as { items?: GoogleVolume[] };
@@ -71,7 +84,7 @@ export const googleBooksProvider: BookProvider = {
   },
 
   async lookupByIsbn(isbn) {
-    const params = new URLSearchParams({ q: `isbn:${isbn}` });
+    const params = withKey(new URLSearchParams({ q: `isbn:${isbn}` }));
     const res = await fetch(`${BASE_URL}?${params.toString()}`);
     if (!res.ok) return null;
     const data = (await res.json()) as { items?: GoogleVolume[] };

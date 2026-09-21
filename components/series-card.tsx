@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
+import { BookCover } from "@/components/book-cover";
 import { cn } from "@/lib/utils";
 import { addMissingSeriesBooksToWishlistAction } from "@/lib/actions";
 import type { getSeriesOverview } from "@/lib/queries";
@@ -85,8 +86,29 @@ export function SeriesCard({ series }: { series: SeriesInfo }) {
         {series.missing.length > 0 && (
           <div className="mt-3 flex flex-col gap-2">
             <p className="text-sm text-muted-foreground">
-              Missing: {series.missing.map((n) => `#${n}`).join(", ")}
+              Missing {series.missing.length}{" "}
+              {series.missing.length === 1 ? "book" : "books"}
             </p>
+            <div className="flex gap-3 overflow-x-auto pb-2">
+              {series.missing.map((m) => (
+                <div key={m.position} className="w-16 shrink-0">
+                  <BookCover
+                    coverUrl={m.coverUrl}
+                    title={m.title ?? `#${m.position}`}
+                    className="opacity-50 outline outline-dashed outline-1 outline-muted-foreground"
+                  >
+                    <span className="absolute bottom-0.5 right-0.5 rounded bg-background/90 px-1 text-[10px] font-medium">
+                      #{m.position}
+                    </span>
+                  </BookCover>
+                  {m.title && (
+                    <p className="mt-1 line-clamp-2 text-[11px] leading-tight text-muted-foreground">
+                      {m.title}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
             <Button
               size="sm"
               variant="outline"

@@ -1,5 +1,5 @@
 import type { BookProvider, NormalizedBook } from "../types";
-import { parseSeriesFromTitle } from "../series";
+import { parseSeriesField, parseSeriesFromTitle } from "../series";
 
 interface OpenLibraryDoc {
   key: string;
@@ -11,12 +11,19 @@ interface OpenLibraryDoc {
   first_publish_year?: number;
   language?: string[];
   subject?: string[];
+  series?: string[];
 }
 
 function normalize(doc: OpenLibraryDoc): NormalizedBook {
-  const { title, seriesName, seriesPosition } = parseSeriesFromTitle(
-    doc.title
-  );
+  const fromTitle = parseSeriesFromTitle(doc.title);
+  // Prefer Open Library's own `series` field when present — it's a real
+  // indexed field, not a guess parsed out of the title text.
+  const fromField = doc.series?.[0] ? parseSeriesField(doc.series[0]) : null;
+
+  const title = fromTitle.title;
+  const seriesName = fromField?.seriesName ?? fromTitle.seriesName;
+  const seriesPosition = fromField?.seriesPosition ?? fromTitle.seriesPosition;
+
   const isbns = doc.isbn ?? [];
 
   return {
@@ -51,11 +58,11 @@ export const openLibraryProvider: BookProvider = {
       limit: String(limit),
       // Restrict to the fields we actually use — the default response
       // includes a lot more per-edition data and is noticeably slower.
-      fields: "key,title,author_name,isbn,cover_i,publisher,first_publish_year,language,subject",
+      fields: "key,title,author_name,isbn,cover_i,publisher,first_publish_year,language,subject,series",
     });
     const res = await fetch(`${BASE_URL}/search.json?${params.toString()}`, {
       next: { revalidate: 3600 },
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(4000),
     });
     if (!res.ok) return [];
     const data = (await res.json()) as { docs?: OpenLibraryDoc[] };

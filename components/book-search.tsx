@@ -99,7 +99,10 @@ export function BookSearch() {
   const requestId = useRef(0);
 
   useEffect(() => {
-    if (!deferredQuery.trim()) return;
+    // Skip 1-2 character prefixes entirely — they're the least useful
+    // queries and the biggest source of wasted external API calls while
+    // typing (each keystroke pause fires a request).
+    if (deferredQuery.trim().length < 3) return;
 
     const handle = setTimeout(() => {
       const thisRequest = ++requestId.current;
@@ -113,11 +116,11 @@ export function BookSearch() {
         setSearched(true);
         setGenre("all");
       });
-    }, 200);
+    }, 300);
     return () => clearTimeout(handle);
   }, [deferredQuery]);
 
-  const isEmptyQuery = !deferredQuery.trim();
+  const isEmptyQuery = deferredQuery.trim().length < 3;
   const displaySearched = !isEmptyQuery && searched;
 
   const rawResults = useMemo(
