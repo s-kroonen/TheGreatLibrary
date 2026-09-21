@@ -1,0 +1,24 @@
+# Postgres only, for local development — pairs with `npm run dev`, which
+# still gives you hot reload. For the full stack (app + db, production
+# image, no hot reload — useful for confirming the real build works),
+# use docker-compose.yml instead.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-librarian}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-librarian}
+      POSTGRES_DB: ${POSTGRES_DB:-greatlibrary}
+    volumes:
+      - db_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-librarian}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data_dev:

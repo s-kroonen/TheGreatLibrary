@@ -13,7 +13,7 @@ and Open Library.
 ### Prerequisites
 
 - Node.js 22+
-- PostgreSQL 16 (running locally, or via Docker — see below)
+- PostgreSQL 16 — either installed locally, or via Docker (see **Postgres via Docker** below, the easier route if you don't already have Postgres set up)
 
 ### Setup
 
@@ -22,20 +22,21 @@ npm install
 cp .env.example .env
 ```
 
-Fill in `.env`:
+Fill in `.env` (the defaults already match the Docker Postgres setup below,
+so if you're using that you can leave `DATABASE_URL` as-is):
 
 - `DATABASE_URL` — defaults to `postgres://librarian:librarian@localhost:5432/greatlibrary`.
-  Either create that role/database locally, or point it at whatever
-  Postgres instance you're running.
 - `BETTER_AUTH_SECRET` — any random string for local dev (`openssl rand -hex 32`).
 - `BETTER_AUTH_URL` — `http://localhost:3000` for local dev.
 - `GOOGLE_BOOKS_API_KEY` — optional but recommended; see **Google Books API key** below.
 
-Start Postgres (adjust for your OS/setup):
+Start Postgres — either your own local install:
 
 ```sh
 service postgresql start
 ```
+
+or in Docker (see **Postgres via Docker** below).
 
 Push the schema (needed once, and again after any `db/schema.ts` change):
 
@@ -50,6 +51,36 @@ npm run dev
 ```
 
 The app is at `http://localhost:3000`.
+
+### Postgres via Docker
+
+Two different things, depending on what you want:
+
+**Just Postgres, for day-to-day dev** — this is the one that pairs with
+`npm run dev` above and still gives you hot reload:
+
+```sh
+docker compose -f docker-compose.dev.yml up -d
+```
+
+Starts a `postgres:16-alpine` container on `localhost:5432` with a
+persistent volume, using the same `librarian`/`librarian`/`greatlibrary`
+credentials `DATABASE_URL` already defaults to — no extra env vars
+needed. Stop it with `docker compose -f docker-compose.dev.yml down`
+(add `-v` to also wipe the data).
+
+**The whole app, built as the real production image** — no hot reload,
+but confirms the actual Docker build/Postgres/entrypoint sequence works
+exactly like it will in production:
+
+```sh
+docker compose up --build
+```
+
+This is `docker-compose.yml` (the same file Portainer deploys from — see
+[DEPLOY.md](./DEPLOY.md)), so it needs the fuller set of env vars that
+file's `${...}` references expect (`POSTGRES_PASSWORD`, `BETTER_AUTH_SECRET`,
+etc.) — set in `.env` as usual.
 
 ### Running in WebStorm
 
