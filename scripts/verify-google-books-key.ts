@@ -2,6 +2,8 @@
  * Sanity-checks GOOGLE_BOOKS_API_KEY (or the lack of one) against the
  * real Google Books API. Run with: npm run verify:google-books
  */
+export {}; // force module scope — avoids colliding with other scripts' `main`
+
 async function main() {
   const key = process.env.GOOGLE_BOOKS_API_KEY;
 

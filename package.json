@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "db:push": "drizzle-kit push",
-    "verify:google-books": "tsx --env-file=.env scripts/verify-google-books-key.ts"
+    "verify:google-books": "tsx --env-file=.env scripts/verify-google-books-key.ts",
+    "inspect:book": "tsx --env-file=.env scripts/inspect-book.ts"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",
