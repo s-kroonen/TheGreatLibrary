@@ -107,12 +107,19 @@ function tokenSimilarity(query: string, candidate: string): number {
  */
 export function findSpellingSuggestion<T extends { title: string; authors: string[] }>(
   query: string,
-  candidates: T[]
+  candidates: T[],
+  isAllowed?: (candidate: T) => boolean
 ): T | null {
   const q = words(query);
   if (q.length < 6) return null; // too short for edit-distance to mean anything
 
-  const top = candidates.slice(0, 5);
+  // Filtered before picking the top few, not after: a suggestion has to
+  // be something the user would actually see (e.g. under their current
+  // language filter), and an excluded candidate that happens to be an
+  // exact match shouldn't count as "query already satisfied" either —
+  // it isn't, from what's visible to them.
+  const allowed = isAllowed ? candidates.filter(isAllowed) : candidates;
+  const top = allowed.slice(0, 5);
   const scored = top.map((candidate) => ({
     candidate,
     score: tokenSimilarity(q, words(`${candidate.title} ${candidate.authors[0] ?? ""}`)),

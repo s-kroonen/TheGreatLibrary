@@ -78,7 +78,12 @@ function normalize(doc: OpenLibraryDoc): NormalizedBook {
     publishedDate: doc.first_publish_year
       ? String(doc.first_publish_year)
       : undefined,
+    // Work-level aggregate, not this-edition's language (see NormalizedBook.
+    // languages) — array(0) is unordered and frequently wrong for
+    // filtering (e.g. Dune's real list starts with "rum"). Keep it only
+    // as a rough display value; `languages` below is what filtering uses.
     language: doc.language?.[0],
+    languages: doc.language,
     genres: doc.subject?.slice(0, 5) ?? [],
     seriesName,
     seriesPosition,

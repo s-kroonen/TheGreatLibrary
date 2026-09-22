@@ -16,6 +16,7 @@ import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
 import { findSpellingSuggestion } from "@/lib/books/match";
 import { getGoogleBooksPrice } from "@/lib/books/price";
+import { matchesLanguageFilter, type LanguageFilter } from "@/lib/books/language";
 import { findOrCreateSeries, backfillBookSeries, ensureSeriesLineup } from "@/lib/series-sync";
 import { logger } from "@/lib/logger";
 import type { NormalizedBook } from "@/lib/books/types";
@@ -37,18 +38,38 @@ export interface SearchOutcome {
   /** Set when the results suggest the query has a typo — see
    * findSpellingSuggestion for how this is derived (from the results
    * already fetched, no extra requests). Null when the query already
-   * looks correct or nothing plausible was found. */
-  suggestion: { title: string; authors: string[] } | null;
+   * looks correct or nothing plausible was found. Only ever suggests a
+   * book that passes the language filter the request was made with, and
+   * carries its own `languages` so the client can re-check that against
+   * a filter change made after the fact without another request. */
+  suggestion: { title: string; authors: string[]; languages: string[] } | null;
 }
 
-export async function searchBooksAction(query: string): Promise<SearchOutcome> {
+export interface LanguageFilterInput {
+  languages: LanguageFilter[];
+  showOtherLanguages: boolean;
+}
+
+export async function searchBooksAction(
+  query: string,
+  languageFilter: LanguageFilterInput
+): Promise<SearchOutcome> {
   const user = await requireUser();
   logger.info(SCOPE, "searchBooksAction called", {
     query,
     userId: user?.id ?? null,
+    languageFilter,
   });
   const results = await searchBooks(query, 20);
-  const suggestion = findSpellingSuggestion(query, results);
+  const selected = new Set(languageFilter.languages);
+  const suggestionMatch = findSpellingSuggestion(query, results, (b) =>
+    matchesLanguageFilter(b.languages, selected, languageFilter.showOtherLanguages)
+  );
+  const suggestion = suggestionMatch && {
+    title: suggestionMatch.title,
+    authors: suggestionMatch.authors,
+    languages: suggestionMatch.languages ?? [],
+  };
   if (suggestion) {
     logger.info(SCOPE, "spelling suggestion offered", {
       query,

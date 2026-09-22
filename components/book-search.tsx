@@ -32,7 +32,7 @@ import {
   addManualBookAction,
   type SearchResult,
 } from "@/lib/actions";
-import { normalizeLanguage, type LanguageFilter } from "@/lib/books/language";
+import { matchesLanguageFilter, type LanguageFilter } from "@/lib/books/language";
 
 const LANGUAGE_OPTIONS: { value: LanguageFilter; label: string }[] = [
   { value: "en", label: "English" },
@@ -89,6 +89,7 @@ export function BookSearch() {
   const [suggestion, setSuggestion] = useState<{
     title: string;
     authors: string[];
+    languages: string[];
   } | null>(null);
   const [searching, startSearch] = useTransition();
   const [adding, setAdding] = useState<string | null>(null);
@@ -102,6 +103,17 @@ export function BookSearch() {
   const router = useRouter();
   const requestId = useRef(0);
 
+  // Read inside the debounced search below via a ref, not a dependency —
+  // toggling a language button re-filters the already-fetched results
+  // instantly and shouldn't itself trigger a new request. The ref just
+  // makes sure that request, whenever it does fire, uses the filter as
+  // it stood at that moment rather than whatever it was when the effect
+  // was first created.
+  const languageFilterRef = useRef({ languages, showOtherLanguages });
+  useEffect(() => {
+    languageFilterRef.current = { languages, showOtherLanguages };
+  }, [languages, showOtherLanguages]);
+
   useEffect(() => {
     // Skip 1-2 character prefixes entirely — they're the least useful
     // queries and the biggest source of wasted external API calls while
@@ -111,8 +123,15 @@ export function BookSearch() {
     const handle = setTimeout(() => {
       const thisRequest = ++requestId.current;
       startSearch(async () => {
-        const { results: found, suggestion: newSuggestion } =
-          await searchBooksAction(deferredQuery);
+        const { languages: currentLanguages, showOtherLanguages: currentShowOther } =
+          languageFilterRef.current;
+        const { results: found, suggestion: newSuggestion } = await searchBooksAction(
+          deferredQuery,
+          {
+            languages: Array.from(currentLanguages),
+            showOtherLanguages: currentShowOther,
+          }
+        );
         // Ignore this response if a newer keystroke already kicked off
         // another search — otherwise a slower earlier request can land
         // after a faster later one and flash outdated results.
@@ -129,7 +148,16 @@ export function BookSearch() {
   const isEmptyQuery = deferredQuery.trim().length < 3;
   const displaySearched = !isEmptyQuery && searched;
 
-  const displaySuggestion = isEmptyQuery ? null : suggestion;
+  // Re-checked against the *current* filter, not just the one the
+  // request was made with — so toggling a language button after a
+  // suggestion is already showing hides it immediately if it no longer
+  // qualifies, with no extra request.
+  const displaySuggestion =
+    isEmptyQuery || !suggestion
+      ? null
+      : matchesLanguageFilter(suggestion.languages, languages, showOtherLanguages)
+        ? suggestion
+        : null;
 
   const rawResults = useMemo(
     () => (isEmptyQuery ? [] : results),
@@ -138,12 +166,9 @@ export function BookSearch() {
 
   const languageFiltered = useMemo(
     () =>
-      rawResults.filter((r) => {
-        const lang = normalizeLanguage(r.language);
-        if (lang === undefined) return true; // unknown — never hidden
-        if (lang === "other") return showOtherLanguages;
-        return languages.has(lang);
-      }),
+      rawResults.filter((r) =>
+        matchesLanguageFilter(r.languages, languages, showOtherLanguages)
+      ),
     [rawResults, languages, showOtherLanguages]
   );
 

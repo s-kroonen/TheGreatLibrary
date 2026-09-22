@@ -48,6 +48,7 @@ function normalize(volume: GoogleVolume): NormalizedBook {
     publishedDate: info.publishedDate,
     pageCount: info.pageCount,
     language: info.language,
+    languages: info.language ? [info.language] : [],
     genres: info.categories ?? [],
     seriesName,
     seriesPosition,

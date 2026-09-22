@@ -14,7 +14,17 @@ export interface NormalizedBook {
   publisher?: string;
   publishedDate?: string;
   pageCount?: number;
+  /** Single best-guess language, kept for display/storage. */
   language?: string;
+  /** Every language code the source associates with this record. For
+   * Google Books this is just [language] (one volume, one language). For
+   * Open Library it's the *work's* full list of edition languages, e.g.
+   * Dune's real list starts with "rum" — the work-level search index
+   * doesn't distinguish "the original language" from "a language some
+   * translation exists in", so `language` above can be misleading for
+   * filtering. Filtering logic should check this array's membership, not
+   * treat `language` as authoritative. */
+  languages?: string[];
   genres: string[];
   /** Best-effort series info parsed from the source, if any. */
   seriesName?: string;
