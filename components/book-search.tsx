@@ -86,6 +86,10 @@ export function BookSearch() {
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [suggestion, setSuggestion] = useState<{
+    title: string;
+    authors: string[];
+  } | null>(null);
   const [searching, startSearch] = useTransition();
   const [adding, setAdding] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
@@ -107,12 +111,14 @@ export function BookSearch() {
     const handle = setTimeout(() => {
       const thisRequest = ++requestId.current;
       startSearch(async () => {
-        const found = await searchBooksAction(deferredQuery);
+        const { results: found, suggestion: newSuggestion } =
+          await searchBooksAction(deferredQuery);
         // Ignore this response if a newer keystroke already kicked off
         // another search — otherwise a slower earlier request can land
         // after a faster later one and flash outdated results.
         if (thisRequest !== requestId.current) return;
         setResults(found);
+        setSuggestion(newSuggestion);
         setSearched(true);
         setGenre("all");
       });
@@ -122,6 +128,8 @@ export function BookSearch() {
 
   const isEmptyQuery = deferredQuery.trim().length < 3;
   const displaySearched = !isEmptyQuery && searched;
+
+  const displaySuggestion = isEmptyQuery ? null : suggestion;
 
   const rawResults = useMemo(
     () => (isEmptyQuery ? [] : results),
@@ -211,6 +219,27 @@ export function BookSearch() {
           <Loader2 className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
         )}
       </div>
+
+      {displaySuggestion && !searching && (
+        <p className="-mt-2 text-sm text-muted-foreground">
+          Did you mean{" "}
+          <button
+            type="button"
+            className="font-medium text-foreground underline underline-offset-2"
+            onClick={() =>
+              setQuery(
+                displaySuggestion.authors[0]
+                  ? `${displaySuggestion.title} ${displaySuggestion.authors[0]}`
+                  : displaySuggestion.title
+              )
+            }
+          >
+            {displaySuggestion.title}
+            {displaySuggestion.authors[0] ? ` by ${displaySuggestion.authors[0]}` : ""}
+          </button>
+          ?
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         {LANGUAGE_OPTIONS.map((opt) => (

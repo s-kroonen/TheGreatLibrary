@@ -7,6 +7,17 @@ import type { SeriesVolume } from "@/db/schema";
 const SCOPE = "provider:openlibrary";
 const BASE_URL = "https://openlibrary.org";
 
+/** Open Library has no API key — but per their own published policy
+ * (openlibrary.org/developers/api), an unidentified request is capped at
+ * 1 req/s while one with a descriptive User-Agent (app name + a contact
+ * email or URL) gets 3 req/s. We were sending no User-Agent at all, so
+ * every request ran at the lower anonymous rate for no reason. Set
+ * OPEN_LIBRARY_CONTACT in .env to your email for the full policy match;
+ * the repo URL fallback still identifies the app either way. */
+const USER_AGENT = `TheGreatLibrary/1.0 (+${
+  process.env.OPEN_LIBRARY_CONTACT ?? "https://github.com/s-kroonen/TheGreatLibrary"
+})`;
+
 /** Every field normalize() reads. Restricting the response to these is
  * noticeably faster than the default, which carries a lot of per-edition
  * data. `series` is kept for old records, but the index's real series
@@ -87,6 +98,7 @@ async function querySearch(
     const res = await fetch(
       `${BASE_URL}/search.json?${new URLSearchParams(params).toString()}`,
       {
+        headers: { "User-Agent": USER_AGENT },
         ...(opts.cache ? { next: { revalidate: 3600 } } : {}),
         signal: AbortSignal.timeout(opts.timeoutMs ?? 6000),
       }

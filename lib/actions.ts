@@ -14,6 +14,7 @@ import {
 } from "@/db/schema";
 import { requireUser } from "@/lib/session";
 import { searchBooks, lookupByIsbn } from "@/lib/books/search";
+import { findSpellingSuggestion } from "@/lib/books/match";
 import { getGoogleBooksPrice } from "@/lib/books/price";
 import { findOrCreateSeries, backfillBookSeries, ensureSeriesLineup } from "@/lib/series-sync";
 import { logger } from "@/lib/logger";
@@ -31,15 +32,37 @@ export type SearchResult = NormalizedBook & {
   existingStatus: UserBookStatus | null;
 };
 
-export async function searchBooksAction(query: string): Promise<SearchResult[]> {
+export interface SearchOutcome {
+  results: SearchResult[];
+  /** Set when the results suggest the query has a typo — see
+   * findSpellingSuggestion for how this is derived (from the results
+   * already fetched, no extra requests). Null when the query already
+   * looks correct or nothing plausible was found. */
+  suggestion: { title: string; authors: string[] } | null;
+}
+
+export async function searchBooksAction(query: string): Promise<SearchOutcome> {
   const user = await requireUser();
   logger.info(SCOPE, "searchBooksAction called", {
     query,
     userId: user?.id ?? null,
   });
   const results = await searchBooks(query, 20);
+  const suggestion = findSpellingSuggestion(query, results);
+  if (suggestion) {
+    logger.info(SCOPE, "spelling suggestion offered", {
+      query,
+      suggestedTitle: suggestion.title,
+      suggestedAuthor: suggestion.authors[0] ?? null,
+    });
+  }
 
-  if (!user) return results.map((r) => ({ ...r, existingStatus: null }));
+  if (!user) {
+    return {
+      results: results.map((r) => ({ ...r, existingStatus: null })),
+      suggestion,
+    };
+  }
 
   const library = await db.query.userBook.findMany({
     where: eq(userBook.userId, user.id),
@@ -51,13 +74,14 @@ export async function searchBooksAction(query: string): Promise<SearchResult[]> 
     if (ub.book.isbn10) statusByIsbn.set(ub.book.isbn10, ub.status);
   }
 
-  return results.map((r) => ({
+  const withStatus = results.map((r) => ({
     ...r,
     existingStatus:
       (r.isbn13 && statusByIsbn.get(r.isbn13)) ||
       (r.isbn10 && statusByIsbn.get(r.isbn10)) ||
       null,
   }));
+  return { results: withStatus, suggestion };
 }
 
 /** Upserts a normalized external book into the shared `book` table. */
