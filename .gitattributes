@@ -1,0 +1,5 @@
+# Shell scripts run inside Linux containers — CRLF line endings break their
+# shebang line ("exec: no such file or directory"). Force LF regardless of
+# core.autocrlf on any given checkout (Windows dev machines default it to
+# true, which silently reintroduces this bug).
+*.sh text eol=lf
