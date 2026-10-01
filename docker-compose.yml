@@ -13,6 +13,12 @@ services:
       GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
       OPEN_LIBRARY_CONTACT: ${OPEN_LIBRARY_CONTACT:-}
       HARDCOVER_API_KEY: ${HARDCOVER_API_KEY:-}
+      # Set to "true" for one boot right after adding a new series-detection
+      # provider (or any other change to that logic) to re-attempt every
+      # still-unlinked book immediately, ignoring the usual cooldown that
+      # would otherwise leave recently-checked books stuck for up to 7
+      # days. Unset/anything else for normal operation.
+      FORCE_SERIES_RECHECK: ${FORCE_SERIES_RECHECK:-}
     depends_on:
       db:
         condition: service_healthy
@@ -20,6 +26,13 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Exposed on the host/LAN for external DB tools — same credentials as
+    # DATABASE_URL above, so anyone with network access AND
+    # POSTGRES_PASSWORD can connect. Fine on a private LAN; don't expose
+    # this on a network you don't trust without also tightening the
+    # binding (e.g. "127.0.0.1:5432:5432" to restrict it to the host).
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-librarian}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

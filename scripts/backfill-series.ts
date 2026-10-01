@@ -6,12 +6,21 @@
  * series, and backfills them via an ISBN lookup.
  *
  * Also gives series rows that only have a name (created before we stored
- * Open Library's series key) their key, which is what lets the series page
+ * a provider's series key) their key, which is what lets the series page
  * list the full lineup accurately instead of guessing it by name.
  *
  * Safe to run on every boot: it only touches rows still missing a
  * seriesId (and books already checked in the last week are skipped), so
  * an already-fixed library is a fast no-op.
+ *
+ * Set FORCE_SERIES_RECHECK=true for one boot to ignore the "already
+ * checked recently" cooldown and the provider-response cache, and
+ * re-attempt every still-unlinked book regardless of when it was last
+ * tried — the thing to reach for right after adding a new provider (like
+ * Hardcover), since books checked before that existed are otherwise
+ * stuck in their cooldown for up to 7 days even though a fresh check
+ * would now find them. Safe to leave off after a boot or two — once
+ * everything's been retried, the cooldown is doing its normal job again.
  */
 import { and, isNull, lt, or, isNotNull } from "drizzle-orm";
 
@@ -22,13 +31,14 @@ import { logger } from "../lib/logger";
 
 const SCOPE = "backfill-series";
 const RECHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+const FORCE = process.env.FORCE_SERIES_RECHECK === "true";
 
 async function resolveKeylessSeries() {
   const keyless = await db.query.series.findMany({ where: isNull(series.source) });
   let resolved = 0;
   for (const s of keyless) {
     try {
-      if (await resolveSeriesSource(s.id)) resolved++;
+      if (await resolveSeriesSource(s.id, { force: FORCE })) resolved++;
     } catch (err) {
       logger.error(SCOPE, "series key resolution failed", {
         seriesId: s.id,
@@ -38,19 +48,25 @@ async function resolveKeylessSeries() {
     }
   }
   if (keyless.length) {
-    logger.info(SCOPE, "series key pass complete", { checked: keyless.length, resolved });
+    logger.info(SCOPE, "series key pass complete", { checked: keyless.length, resolved, forced: FORCE });
   }
 }
 
 async function main() {
+  if (FORCE) {
+    logger.warn(SCOPE, "FORCE_SERIES_RECHECK is set — ignoring the recheck cooldown and provider cache for this boot");
+  }
+
   const orphaned = await db.query.book.findMany({
     where: and(
       isNull(book.seriesId),
       or(isNotNull(book.isbn13), isNotNull(book.isbn10)),
-      or(
-        isNull(book.seriesCheckedAt),
-        lt(book.seriesCheckedAt, new Date(Date.now() - RECHECK_AFTER_MS))
-      )
+      FORCE
+        ? undefined
+        : or(
+            isNull(book.seriesCheckedAt),
+            lt(book.seriesCheckedAt, new Date(Date.now() - RECHECK_AFTER_MS))
+          )
     ),
   });
 
@@ -67,12 +83,13 @@ async function main() {
 async function linkOrphans(orphaned: (typeof book.$inferSelect)[]) {
   logger.info(SCOPE, "checking books for a missing series link", {
     candidateCount: orphaned.length,
+    forced: FORCE,
   });
 
   let fixed = 0;
   for (const b of orphaned) {
     try {
-      if (await backfillBookSeries(b)) fixed++;
+      if (await backfillBookSeries(b, { force: FORCE })) fixed++;
     } catch (err) {
       logger.error(SCOPE, "failed for book", {
         bookId: b.id,

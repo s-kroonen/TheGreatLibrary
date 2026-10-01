@@ -7,6 +7,7 @@ import { discoverSeriesVolumes } from "@/lib/books/series-lookup";
 import { lookupByIsbn } from "@/lib/books/search";
 import { findOpenLibrarySeries, fetchOpenLibrarySeriesLineup } from "@/lib/books/providers/open-library";
 import { findHardcoverSeries, fetchHardcoverSeriesLineup } from "@/lib/books/providers/hardcover";
+import type { CacheOptions } from "@/lib/books/provider-cache";
 import type { NormalizedBook, SeriesProviderSource } from "@/lib/books/types";
 import { logger } from "@/lib/logger";
 
@@ -28,16 +29,15 @@ interface FoundSeries {
  * Library tends to have nothing on at all, verified against real
  * responses for a batch of series neither our ISBN lookup nor Open
  * Library's own fallback could place. */
-async function findSeriesAnyProvider(book: {
-  isbn?: string;
-  title: string;
-  authors: string[];
-}): Promise<FoundSeries | null> {
-  const ol = await findOpenLibrarySeries(book);
+async function findSeriesAnyProvider(
+  book: { isbn?: string; title: string; authors: string[] },
+  opts: CacheOptions = {}
+): Promise<FoundSeries | null> {
+  const ol = await findOpenLibrarySeries(book, opts);
   if (ol) {
     return { seriesName: ol.seriesName, seriesPosition: ol.seriesPosition, source: "openlibrary", sourceId: ol.seriesKey };
   }
-  const hc = await findHardcoverSeries(book);
+  const hc = await findHardcoverSeries(book, opts);
   if (hc) {
     return { seriesName: hc.seriesName, seriesPosition: hc.seriesPosition, source: "hardcover", sourceId: hc.seriesId };
   }
@@ -130,7 +130,8 @@ export async function findOrCreateSeries(
  * resolves (or another row already owns that key).
  */
 export async function resolveSeriesSource(
-  seriesId: string
+  seriesId: string,
+  opts: CacheOptions = {}
 ): Promise<{ source: ProviderSource; id: string } | null> {
   const members = await db.query.book.findMany({
     where: eq(book.seriesId, seriesId),
@@ -140,8 +141,8 @@ export async function resolveSeriesSource(
   for (const m of members) {
     const book_ = { isbn: m.isbn13 ?? m.isbn10 ?? undefined, title: m.title, authors: m.authors };
     const [ol, hc] = await Promise.all([
-      findOpenLibrarySeries(book_),
-      findHardcoverSeries(book_),
+      findOpenLibrarySeries(book_, opts),
+      findHardcoverSeries(book_, opts),
     ]);
     if (!ol && !hc) continue;
 
@@ -152,8 +153,8 @@ export async function resolveSeriesSource(
     let chosen: { source: ProviderSource; id: string; name: string };
     if (ol && hc) {
       const [olLineup, hcLineup] = await Promise.all([
-        fetchOpenLibrarySeriesLineup(ol.seriesKey),
-        fetchHardcoverSeriesLineup(hc.seriesId),
+        fetchOpenLibrarySeriesLineup(ol.seriesKey, opts),
+        fetchHardcoverSeriesLineup(hc.seriesId, opts),
       ]);
       const olCount = olLineup?.length ?? 0;
       const hcCount = hcLineup?.length ?? 0;
@@ -206,14 +207,17 @@ export async function resolveSeriesSource(
  * from source" action, the add-book flow and the startup backfill script
  * so all use exactly the same logic.
  */
-export async function backfillBookSeries(bookRow: {
-  id: string;
-  title: string;
-  authors: string[];
-  isbn13: string | null;
-  isbn10: string | null;
-  seriesId: string | null;
-}): Promise<boolean> {
+export async function backfillBookSeries(
+  bookRow: {
+    id: string;
+    title: string;
+    authors: string[];
+    isbn13: string | null;
+    isbn10: string | null;
+    seriesId: string | null;
+  },
+  opts: CacheOptions = {}
+): Promise<boolean> {
   if (bookRow.seriesId) {
     logger.info(SCOPE, "backfill skipped, already linked", { bookId: bookRow.id });
     return false;
@@ -224,7 +228,7 @@ export async function backfillBookSeries(bookRow: {
     return false;
   }
 
-  const fresh = await lookupByIsbn(isbn);
+  const fresh = await lookupByIsbn(isbn, opts);
   // Either no provider knows this ISBN at all, or one does but without
   // series info — lookupByIsbn already tries its own Open Library
   // title/author fallback internally, but it has to use whatever title
@@ -240,7 +244,7 @@ export async function backfillBookSeries(bookRow: {
       ? fresh.seriesKey
         ? { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition, source: "openlibrary", sourceId: fresh.seriesKey }
         : { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition }
-      : await findSeriesAnyProvider({ title: bookRow.title, authors: bookRow.authors });
+      : await findSeriesAnyProvider({ title: bookRow.title, authors: bookRow.authors }, opts);
 
   await db.update(book).set({ seriesCheckedAt: new Date() }).where(eq(book.id, bookRow.id));
 
