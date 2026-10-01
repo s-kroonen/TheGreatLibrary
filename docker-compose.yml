@@ -11,6 +11,8 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL}
       GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
+      OPEN_LIBRARY_CONTACT: ${OPEN_LIBRARY_CONTACT:-}
+      HARDCOVER_API_KEY: ${HARDCOVER_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy
