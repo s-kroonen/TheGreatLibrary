@@ -123,6 +123,48 @@ async function inspectOpenLibrary() {
   }
 }
 
+async function inspectHardcover() {
+  console.log("\n=== Hardcover ===");
+  const key = process.env.HARDCOVER_API_KEY;
+  if (!key) {
+    console.log("HARDCOVER_API_KEY not set — skipping (see .env.example for how to get one).");
+    return;
+  }
+
+  const res = await fetch("https://api.hardcover.app/v1/graphql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      query: `query ($q: String!) { search(query: $q, query_type: "Book", per_page: 5, page: 1) { results } }`,
+      variables: { q: query },
+    }),
+  });
+  const data = (await readJsonSafe(res)) as {
+    data?: { search?: { results?: { hits?: { document?: Record<string, unknown> }[] } } };
+    errors?: unknown;
+  };
+
+  if (!res.ok || data.errors) {
+    console.log(`Request failed (${res.status}):`, JSON.stringify(data, null, 2));
+    return;
+  }
+
+  const hits = data.data?.search?.results?.hits ?? [];
+  console.log(`${hits.length} result(s) for "${query}"\n`);
+  for (const hit of hits) {
+    const d = hit.document ?? {};
+    console.log(`--- ${d.title ?? "(no title)"} ---`);
+    console.log("authors:", d.author_names ?? null);
+    console.log("isbns:", d.isbns ?? null);
+    console.log(
+      "featured_series / position:",
+      JSON.stringify(d.featured_series ?? null),
+      d.featured_series_position ?? null
+    );
+    console.log();
+  }
+}
+
 async function main() {
   console.log(`Inspecting: "${query}"`);
   await inspectGoogleBooks().catch((err) =>
@@ -130,6 +172,9 @@ async function main() {
   );
   await inspectOpenLibrary().catch((err) =>
     console.log("Open Library request errored:", err instanceof Error ? err.message : err)
+  );
+  await inspectHardcover().catch((err) =>
+    console.log("Hardcover request errored:", err instanceof Error ? err.message : err)
   );
 }
 

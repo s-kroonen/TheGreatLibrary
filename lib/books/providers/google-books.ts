@@ -1,4 +1,4 @@
-import type { BookProvider, NormalizedBook } from "../types";
+import type { BookProvider, NormalizedBook, SearchOptions } from "../types";
 import { parseSeriesFromTitle } from "../series";
 import { logger } from "@/lib/logger";
 
@@ -71,7 +71,7 @@ function withKey(params: URLSearchParams): URLSearchParams {
 export const googleBooksProvider: BookProvider = {
   name: "googlebooks",
 
-  async search(query, limit = 20) {
+  async search(query, limit = 20, opts: SearchOptions = {}) {
     const hasKey = !!process.env.GOOGLE_BOOKS_API_KEY;
     const params = withKey(
       new URLSearchParams({
@@ -83,7 +83,7 @@ export const googleBooksProvider: BookProvider = {
     try {
       const res = await fetch(`${BASE_URL}?${params.toString()}`, {
         next: { revalidate: 3600 },
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 4000),
       });
       const durationMs = Date.now() - start;
 

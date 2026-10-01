@@ -1,5 +1,5 @@
 import type { NormalizedBook } from "./types";
-import { normalizedTitle, sharesAuthor, titleStem } from "./match";
+import { isCollectionListing, normalizedTitle, sharesAuthor, titleStem } from "./match";
 
 function dedupeKey(book: NormalizedBook): string {
   if (book.isbn13) return `isbn:${book.isbn13}`;
@@ -30,7 +30,9 @@ export function mergeResults(
   secondary: NormalizedBook[],
   limit: number
 ): NormalizedBook[] {
-  const seriesSource = [...primary, ...secondary].filter((b) => b.seriesName);
+  const seriesSource = [...primary, ...secondary].filter(
+    (b) => b.seriesName && !isCollectionListing(b.title)
+  );
   const withSeries = (book: NormalizedBook): NormalizedBook => {
     if (book.seriesName) return book;
     const stem = titleStem(book.title);
@@ -51,6 +53,10 @@ export function mergeResults(
   const seenTitleAuthor = new Set<string>();
   const merged: NormalizedBook[] = [];
   const add = (book: NormalizedBook) => {
+    // Bundle/box-set listings aren't a purchasable single book — showing
+    // one in search results (or letting it fill a series-lineup slot)
+    // just confuses "add this book" with a garbled multi-title name.
+    if (isCollectionListing(book.title)) return;
     const key = dedupeKey(book);
     const ta = titleAuthorKey(book);
     if (seen.has(key) || seenTitleAuthor.has(ta)) return;

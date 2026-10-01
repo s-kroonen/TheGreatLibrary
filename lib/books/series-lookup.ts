@@ -1,5 +1,8 @@
 import { searchBooks } from "./search";
 import { fetchOpenLibrarySeriesLineup } from "./providers/open-library";
+import { fetchHardcoverSeriesLineup } from "./providers/hardcover";
+import { extractAnchoredPosition } from "./series";
+import type { NormalizedBook, SeriesProviderSource } from "./types";
 import type { SeriesVolume } from "@/db/schema";
 
 /**
@@ -8,36 +11,52 @@ import type { SeriesVolume } from "@/db/schema";
  * have 1 of 5" instead of "you have 1 of 1" (the latter being all we
  * could ever infer purely from the user's own collection).
  *
- * With an Open Library series key this is exact: every member work is
- * listed with its position. Without one it falls back to keyword-searching
- * the series name, which is unreliable (most volumes don't have the series
- * name in their title, so it finds few of them) — the key is worth
- * resolving whenever possible, see `resolveSeriesKey` in series-sync.ts.
+ * With a resolved provider key this is exact: every member work is listed
+ * with its position, from whichever of Open Library / Hardcover turned
+ * out to have the bigger lineup for this series (see resolveSeriesSource
+ * in series-sync.ts). Without one it falls back to keyword-searching the
+ * series name, which is far less reliable — most volumes don't carry the
+ * series name in a structured field, so it finds few of them unless the
+ * title spells the series name out (handled by extractAnchoredPosition).
  *
  * Returns null when the lookup itself failed, so callers don't cache a
  * transient outage as "this series has no volumes".
  */
 export async function discoverSeriesVolumes(series: {
   name: string;
-  openLibraryKey: string | null;
+  source: SeriesProviderSource | null;
+  sourceId: string | null;
 }): Promise<SeriesVolume[] | null> {
-  if (series.openLibraryKey) {
-    return fetchOpenLibrarySeriesLineup(series.openLibraryKey);
+  if (series.source === "openlibrary" && series.sourceId) {
+    return fetchOpenLibrarySeriesLineup(series.sourceId);
+  }
+  if (series.source === "hardcover" && series.sourceId) {
+    return fetchHardcoverSeriesLineup(series.sourceId);
   }
   return discoverByName(series.name);
 }
 
 async function discoverByName(seriesName: string): Promise<SeriesVolume[]> {
-  const found = await searchBooks(seriesName, 40);
-  const matches = found.filter(
-    (b) =>
-      b.seriesName?.toLowerCase() === seriesName.toLowerCase() &&
-      b.seriesPosition !== undefined
-  );
+  const found = await searchBooks(seriesName, 40, { background: true });
+
+  const withPosition: { book: NormalizedBook; position: number }[] = [];
+  for (const b of found) {
+    const position =
+      // Prefer a provider's own structured series field when it matches
+      // the series we asked about...
+      (b.seriesName?.toLowerCase() === seriesName.toLowerCase()
+        ? b.seriesPosition
+        : undefined) ??
+      // ...but a lot of self-published titles only number themselves in
+      // plain text ("Zodiac Academy 6: Fated Throne") with no structured
+      // field at all — still unambiguous since it's anchored to the
+      // exact name we searched for.
+      extractAnchoredPosition(b.title, seriesName);
+    if (position !== undefined) withPosition.push({ book: b, position });
+  }
 
   const byPosition = new Map<number, SeriesVolume>();
-  for (const m of matches) {
-    const position = m.seriesPosition!;
+  for (const { book: m, position } of withPosition) {
     if (byPosition.has(position)) continue;
     byPosition.set(position, {
       position,

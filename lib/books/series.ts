@@ -25,6 +25,26 @@ export function parseSeriesFromTitle(
 }
 
 /**
+ * Many self-published/indie series (common across the romance/romantasy
+ * titles this app sees a lot of — "Zodiac Academy 2", "Zodiac Academy 6:
+ * Fated Throne") number volumes directly in the title with no
+ * parentheses at all, a format parseSeriesFromTitle doesn't recognize
+ * (it requires "Title (Series, #N)"). That pattern is too ambiguous to
+ * run generically — "1984", "Catch-22", "2001: A Space Odyssey" are
+ * titles, not Series-plus-number — so this only fires anchored to a
+ * series name already known from elsewhere (series-lookup's name-based
+ * lineup fallback), where "<name> <number>" is unambiguous.
+ */
+export function extractAnchoredPosition(
+  title: string,
+  seriesName: string
+): number | undefined {
+  const escaped = seriesName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = title.match(new RegExp(`^${escaped}\\s+(\\d+(?:\\.\\d+)?)(?:[:.,]|\\s|$)`, "i"));
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
  * Open Library indexes an explicit `series` field for a meaningful chunk
  * of records (not parsed from the title) — formats seen in the wild
  * include "Harry Potter", "Harry Potter ; 4", "Harry Potter #4", and

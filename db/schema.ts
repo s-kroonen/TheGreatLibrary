@@ -79,6 +79,27 @@ export interface SeriesVolume {
   authors?: string[];
 }
 
+// Caches the outcome of external provider lookups (ISBN → book, title+
+// author → series, series id → lineup) keyed deterministically, so a
+// boot-time backfill re-run — or two different books that happen to need
+// the same answer — don't re-hit the network (and, for Hardcover, the
+// free-tier rate limit) for something we already know. `result: null`
+// is a cached "confirmed nothing found", not "never looked up" — that
+// distinction is exactly what lets a boot pass skip a book it already
+// checked instead of asking again every single run.
+export const providerCache = pgTable(
+  "provider_cache",
+  {
+    // `${provider}:${kind}:${key}`, e.g. "hardcover:series-by-title-author:kingsbane|claire legrand"
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull(),
+    kind: text("kind").notNull(),
+    result: jsonb("result"),
+    fetchedAt: timestamp("fetched_at").notNull().defaultNow(),
+  },
+  (t) => [index("provider_cache_fetched_idx").on(t.fetchedAt)]
+);
+
 export const series = pgTable(
   "series",
   {

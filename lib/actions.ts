@@ -13,11 +13,16 @@ import {
   type UserBookStatus,
 } from "@/db/schema";
 import { requireUser } from "@/lib/session";
-import { searchBooks, lookupByIsbn } from "@/lib/books/search";
+import { searchBooksFull, lookupByIsbn } from "@/lib/books/search";
 import { findSpellingSuggestion } from "@/lib/books/match";
 import { getGoogleBooksPrice } from "@/lib/books/price";
 import { matchesLanguageFilter, type LanguageFilter } from "@/lib/books/language";
-import { findOrCreateSeries, backfillBookSeries, ensureSeriesLineup } from "@/lib/series-sync";
+import {
+  findOrCreateSeries,
+  backfillBookSeries,
+  backfillFromLateResults,
+  ensureSeriesLineup,
+} from "@/lib/series-sync";
 import { logger } from "@/lib/logger";
 import type { NormalizedBook } from "@/lib/books/types";
 
@@ -60,7 +65,31 @@ export async function searchBooksAction(
     userId: user?.id ?? null,
     languageFilter,
   });
-  const results = await searchBooks(query, 20);
+  const { results, lateOpenLibrary } = await searchBooksFull(query, 20);
+
+  // Open Library ran past the interactive grace period and got dropped
+  // from `results` above — but it's still running. Don't make the user
+  // wait on it, but don't throw its answer away either: once it lands,
+  // use it to quietly backfill any of the user's own already-added books
+  // it happens to answer. Deliberately not awaited.
+  if (lateOpenLibrary) {
+    lateOpenLibrary
+      .then((lateBooks) => backfillFromLateResults(lateBooks))
+      .then((count) => {
+        if (count) {
+          logger.info(SCOPE, "late open library result backfilled books", { query, count });
+          revalidatePath("/shelf");
+          revalidatePath("/series");
+        }
+      })
+      .catch((err) =>
+        logger.warn(SCOPE, "late open library backfill failed", {
+          query,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
+  }
+
   const selected = new Set(languageFilter.languages);
   const suggestionMatch = findSpellingSuggestion(query, results, (b) =>
     matchesLanguageFilter(b.languages, selected, languageFilter.showOtherLanguages)
@@ -120,7 +149,10 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
     // on first insert, so re-adding/re-searching an existing book can
     // fix it retroactively instead of leaving it orphaned forever.
     if (!existing.seriesId && normalized.seriesName) {
-      const seriesId = await findOrCreateSeries(normalized.seriesName, normalized.seriesKey);
+      const seriesId = await findOrCreateSeries(
+        normalized.seriesName,
+        normalized.seriesKey ? { source: "openlibrary", id: normalized.seriesKey } : undefined
+      );
       await db
         .update(book)
         .set({
@@ -161,7 +193,10 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
 
   let seriesId: string | null = null;
   if (normalized.seriesName) {
-    seriesId = await findOrCreateSeries(normalized.seriesName, normalized.seriesKey);
+    seriesId = await findOrCreateSeries(
+      normalized.seriesName,
+      normalized.seriesKey ? { source: "openlibrary", id: normalized.seriesKey } : undefined
+    );
   } else {
     logger.info(SCOPE, "upsertBook: no series detected on new book", {
       title: normalized.title,
@@ -357,7 +392,9 @@ export async function refreshBookFromSourceAction(bookId: string) {
     hadSeriesAlready: !!existing.seriesId,
   });
 
-  const fresh = await lookupByIsbn(existing.isbn13 ?? existing.isbn10!);
+  // User explicitly asked to refresh — a cached answer, even a fresh
+  // one, is exactly the wrong thing to show here.
+  const fresh = await lookupByIsbn(existing.isbn13 ?? existing.isbn10!, { force: true });
   if (!fresh) {
     logger.warn(SCOPE, "refreshBookFromSourceAction: lookup found nothing", { bookId });
     return;
@@ -365,7 +402,10 @@ export async function refreshBookFromSourceAction(bookId: string) {
 
   const seriesId =
     !existing.seriesId && fresh.seriesName
-      ? await findOrCreateSeries(fresh.seriesName, fresh.seriesKey)
+      ? await findOrCreateSeries(
+          fresh.seriesName,
+          fresh.seriesKey ? { source: "openlibrary", id: fresh.seriesKey } : undefined
+        )
       : existing.seriesId;
 
   await db

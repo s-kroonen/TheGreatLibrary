@@ -2,6 +2,7 @@ import type { NormalizedBook } from "./types";
 import { googleBooksProvider } from "./providers/google-books";
 import { findOpenLibrarySeries, openLibraryProvider } from "./providers/open-library";
 import { mergeResults } from "./merge";
+import { withCache, TTL, type CacheOptions } from "./provider-cache";
 import { logger } from "@/lib/logger";
 
 const SCOPE = "search";
@@ -9,41 +10,76 @@ const SCOPE = "search";
 const providers = [googleBooksProvider, openLibraryProvider];
 
 // Open Library is well known to be slow (and occasionally to hang) — give
-// it a head start alongside Google Books, but don't let it hold up the
-// whole search past this grace period. Its results are still merged in
-// if they land within it; whatever's still in flight after is dropped.
+// it a head start alongside Google Books, but don't let it hold up an
+// *interactive* search past this grace period. This only applies when
+// someone's actually waiting on a response; see `background` below.
 const SLOW_PROVIDER_GRACE_MS = 1500;
+const INTERACTIVE_TIMEOUT_MS = 4000;
+// Series lineup discovery and the startup backfill have no one watching a
+// spinner — a slow-but-complete answer beats a fast-but-wrong one there,
+// so background searches wait out both providers in full with a longer
+// per-request timeout instead of racing/dropping anything.
+const BACKGROUND_TIMEOUT_MS = 10000;
 
-/** Races a provider promise against a grace-period timeout. Reports
- * which one actually won, so callers can log whether the slow provider's
- * results were dropped for taking too long. */
+interface SearchOnceOptions {
+  background?: boolean;
+}
+
+interface SearchOnceResult {
+  results: NormalizedBook[];
+  /** Set only for an interactive (non-background) search where Open
+   * Library's response didn't make it back in time and got dropped from
+   * the results returned to the caller. The promise is still running —
+   * callers that don't need an immediate answer (e.g. the search action,
+   * after it's already responded to the request) can await it anyway and
+   * use whatever it finds to backfill data retroactively, getting the
+   * slow-but-complete answer's value without making the user wait for it. */
+  lateOpenLibrary: Promise<NormalizedBook[]> | null;
+}
+
+/** Races a provider promise against a grace-period timeout, but — unlike
+ * a plain Promise.race — keeps the original promise accessible as `late`
+ * even after the race is decided, so a caller can still use whatever it
+ * eventually resolves to instead of just discarding it. */
 async function raceWithGrace(
   promise: Promise<NormalizedBook[]>,
   graceMs: number
-): Promise<{ books: NormalizedBook[]; droppedByGrace: boolean }> {
-  const timeout = new Promise<{ books: NormalizedBook[]; droppedByGrace: boolean }>(
-    (resolve) =>
-      setTimeout(() => resolve({ books: [], droppedByGrace: true }), graceMs)
+): Promise<{ books: NormalizedBook[]; droppedByGrace: boolean; late: Promise<NormalizedBook[]> | null }> {
+  const TIMED_OUT = Symbol("timed-out");
+  const timeout = new Promise<typeof TIMED_OUT>((resolve) =>
+    setTimeout(() => resolve(TIMED_OUT), graceMs)
   );
-  try {
-    return await Promise.race([
-      promise.then((books) => ({ books, droppedByGrace: false })),
-      timeout,
-    ]);
-  } catch {
-    return { books: [], droppedByGrace: false };
+  const winner = await Promise.race([promise, timeout]).catch(() => []);
+  if (winner === TIMED_OUT) {
+    return { books: [], droppedByGrace: true, late: promise };
   }
+  return { books: winner as NormalizedBook[], droppedByGrace: false, late: null };
 }
 
-async function searchOnce(query: string, limit: number): Promise<NormalizedBook[]> {
+async function searchOnce(
+  query: string,
+  limit: number,
+  opts: SearchOnceOptions = {}
+): Promise<SearchOnceResult> {
+  if (opts.background) {
+    const [googleResults, openLibraryResults] = await Promise.all([
+      googleBooksProvider.search(query, limit, { timeoutMs: BACKGROUND_TIMEOUT_MS }).catch(() => []),
+      openLibraryProvider.search(query, limit, { timeoutMs: BACKGROUND_TIMEOUT_MS }).catch(() => []),
+    ]);
+    return {
+      results: mergeResults(openLibraryResults, googleResults, limit),
+      lateOpenLibrary: null,
+    };
+  }
+
   // Google Books is the fast, primary source — always wait for it (its
   // own internal timeout is the real ceiling). Open Library gets a
   // shorter grace period so a slow response there can't drag the whole
   // search down to it.
   const [googleResults, openLibraryOutcome] = await Promise.all([
-    googleBooksProvider.search(query, limit).catch(() => []),
+    googleBooksProvider.search(query, limit, { timeoutMs: INTERACTIVE_TIMEOUT_MS }).catch(() => []),
     raceWithGrace(
-      openLibraryProvider.search(query, limit).catch(() => []),
+      openLibraryProvider.search(query, limit, { timeoutMs: INTERACTIVE_TIMEOUT_MS }).catch(() => []),
       SLOW_PROVIDER_GRACE_MS
     ),
   ]);
@@ -58,7 +94,10 @@ async function searchOnce(query: string, limit: number): Promise<NormalizedBook[
   // Open Library goes first in the interleave: measured against real
   // queries it ranks the intended book first far more often for short or
   // exact titles ("Dune"), and it's the one carrying series data.
-  return mergeResults(openLibraryOutcome.books, googleResults, limit);
+  return {
+    results: mergeResults(openLibraryOutcome.books, googleResults, limit),
+    lateOpenLibrary: openLibraryOutcome.late,
+  };
 }
 
 /** Collapses runs of a repeated letter down to one, e.g. "harrry potter"
@@ -68,6 +107,11 @@ async function searchOnce(query: string, limit: number): Promise<NormalizedBook[
  * actually spelled correctly. */
 function collapseRepeatedLetters(query: string): string {
   return query.replace(/([a-z])\1+/gi, "$1");
+}
+
+interface SearchBooksOptions {
+  /** See SearchOnceOptions.background. Defaults to false (interactive). */
+  background?: boolean;
 }
 
 /**
@@ -80,16 +124,32 @@ function collapseRepeatedLetters(query: string): string {
  */
 export async function searchBooks(
   query: string,
-  limit = 20
+  limit = 20,
+  opts: SearchBooksOptions = {}
 ): Promise<NormalizedBook[]> {
+  return (await searchBooksFull(query, limit, opts)).results;
+}
+
+/**
+ * Same as searchBooks, but also hands back a promise for Open Library's
+ * response when it was dropped from the (already-returned) results for
+ * running past the interactive grace period — see SearchOnceResult.
+ * lateOpenLibrary. Only the interactive search action needs this; every
+ * other caller just wants the plain result list from searchBooks.
+ */
+export async function searchBooksFull(
+  query: string,
+  limit = 20,
+  opts: SearchBooksOptions = {}
+): Promise<SearchOnceResult> {
   const trimmed = query.trim();
-  if (!trimmed) return [];
+  if (!trimmed) return { results: [], lateOpenLibrary: null };
 
   const start = Date.now();
-  let results = await searchOnce(trimmed, limit);
+  let outcome = await searchOnce(trimmed, limit, opts);
 
   let usedFuzzyRetry = false;
-  if (results.length === 0) {
+  if (outcome.results.length === 0) {
     const relaxed = collapseRepeatedLetters(trimmed);
     if (relaxed !== trimmed) {
       usedFuzzyRetry = true;
@@ -97,19 +157,20 @@ export async function searchBooks(
         original: trimmed,
         relaxed,
       });
-      results = await searchOnce(relaxed, limit);
+      outcome = await searchOnce(relaxed, limit, opts);
     }
   }
 
   logger.info(SCOPE, "search complete", {
     query: trimmed,
     durationMs: Date.now() - start,
-    resultCount: results.length,
+    resultCount: outcome.results.length,
     usedFuzzyRetry,
-    seriesDetected: results.filter((b) => b.seriesName).length,
+    background: opts.background ?? false,
+    seriesDetected: outcome.results.filter((b) => b.seriesName).length,
   });
 
-  return results;
+  return outcome;
 }
 
 /**
@@ -119,7 +180,14 @@ export async function searchBooks(
  * ISBN. So when the record has no series, ask Open Library separately
  * (by ISBN, then title + author) rather than stopping at the first hit.
  */
-export async function lookupByIsbn(isbn: string): Promise<NormalizedBook | null> {
+export async function lookupByIsbn(
+  isbn: string,
+  opts: CacheOptions = {}
+): Promise<NormalizedBook | null> {
+  return withCache("search", "lookup-by-isbn", isbn, TTL.ISBN, () => lookupByIsbnUncached(isbn), opts);
+}
+
+async function lookupByIsbnUncached(isbn: string): Promise<NormalizedBook | null> {
   let found: NormalizedBook | null = null;
   for (const provider of providers) {
     try {

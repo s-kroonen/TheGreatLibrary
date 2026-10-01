@@ -141,3 +141,27 @@ export function findSpellingSuggestion<T extends { title: string; authors: strin
   // this seem related".
   return best && best.score >= 0.75 ? best.candidate : null;
 }
+
+const COLLECTION_PATTERN =
+  /\b(box(ed)?\s*set|collection\s*set|complete\s*collection|books?\s*collection|bundle|omnibus)\b/i;
+
+/**
+ * Whether a title is a multi-book bundle rather than a single volume —
+ * "King of Wrath / King of Pride / King of Greed / King of Sloth" or
+ * "Boys of Tommen Series, 5 Books Collection Set..." Both providers index
+ * these as ordinary search hits indistinguishable from a real book (no
+ * dedicated type flag), and they show up often enough for popular series
+ * to be worth filtering: shown in search results they look like a
+ * purchasable single book with a garbled title, and picked up as a
+ * series-lineup candidate they'd claim a position (if parseable at all —
+ * their position is usually a range like "1-4", not a single number) or
+ * just pollute the match pool.
+ */
+export function isCollectionListing(title: string): boolean {
+  if (COLLECTION_PATTERN.test(title)) return true;
+  // A real single book's title essentially never joins multiple titles
+  // with " / " — that's specifically how these omnibus listings format
+  // "Title A / Title B / Title C".
+  const slashParts = title.split(" / ").filter((p) => p.trim().length > 3);
+  return slashParts.length >= 2;
+}

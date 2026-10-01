@@ -1,6 +1,7 @@
 import type { BookProvider, NormalizedBook } from "../types";
 import { parseSeriesField, parseSeriesFromTitle } from "../series";
-import { sharesAuthor, titleStem } from "../match";
+import { isCollectionListing, sharesAuthor, titleStem } from "../match";
+import { withCache, TTL, type CacheOptions } from "../provider-cache";
 import { logger } from "@/lib/logger";
 import type { SeriesVolume } from "@/db/schema";
 
@@ -146,7 +147,15 @@ export interface ResolvedSeries {
  * 9781398525696 is unknown to it, though the work itself is present and
  * carries the series).
  */
-export async function findOpenLibrarySeries(book: {
+export async function findOpenLibrarySeries(
+  book: { isbn?: string; title: string; authors: string[] },
+  opts: CacheOptions = {}
+): Promise<ResolvedSeries | null> {
+  const key = `${book.isbn ?? "-"}|${titleStem(book.title)}|${(book.authors[0] ?? "").toLowerCase()}`;
+  return withCache("openlibrary", "series-by-book", key, TTL.SERIES, () => findOpenLibrarySeriesUncached(book), opts);
+}
+
+async function findOpenLibrarySeriesUncached(book: {
   isbn?: string;
   title: string;
   authors: string[];
@@ -155,6 +164,7 @@ export async function findOpenLibrarySeries(book: {
 
   const pick = (docs: OpenLibraryDoc[], via: ResolvedSeries["via"]) => {
     for (const doc of docs) {
+      if (isCollectionListing(doc.title)) continue;
       const n = normalize(doc);
       if (!n.seriesKey || !n.seriesName) continue;
       if (via === "title-author") {
@@ -208,8 +218,13 @@ export async function findOpenLibrarySeries(book: {
  * Returns null when the request failed, [] when the series has no members.
  */
 export async function fetchOpenLibrarySeriesLineup(
-  seriesKey: string
+  seriesKey: string,
+  opts: CacheOptions = {}
 ): Promise<SeriesVolume[] | null> {
+  return withCache("openlibrary", "lineup", seriesKey, TTL.LINEUP, () => fetchOpenLibrarySeriesLineupUncached(seriesKey), opts);
+}
+
+async function fetchOpenLibrarySeriesLineupUncached(seriesKey: string): Promise<SeriesVolume[] | null> {
   const start = Date.now();
   const docs = await querySearch(
     {
@@ -227,6 +242,10 @@ export async function fetchOpenLibrarySeriesLineup(
   const byPosition = new Map<number, { volume: SeriesVolume; editions: number }>();
   const skipped: string[] = [];
   for (const doc of docs) {
+    if (isCollectionListing(doc.title)) {
+      skipped.push(doc.title);
+      continue;
+    }
     const idx = doc.series_key?.indexOf(seriesKey) ?? -1;
     const position = idx >= 0 ? parsePosition(doc.series_position?.[idx]) : undefined;
     if (position === undefined || position <= 0) {
@@ -269,12 +288,12 @@ export async function fetchOpenLibrarySeriesLineup(
 export const openLibraryProvider: BookProvider = {
   name: "openlibrary",
 
-  async search(query, limit = 20) {
+  async search(query, limit = 20, opts = {}) {
     const start = Date.now();
     const docs = await querySearch(
       { q: query, limit: String(limit), fields: DOC_FIELDS },
       "search request",
-      { timeoutMs: 4000, cache: true }
+      { timeoutMs: opts.timeoutMs ?? 4000, cache: true }
     );
     if (!docs) return [];
 

@@ -1,14 +1,48 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { db } from "@/db";
 import { book, series, type SeriesVolume } from "@/db/schema";
 import { discoverSeriesVolumes } from "@/lib/books/series-lookup";
 import { lookupByIsbn } from "@/lib/books/search";
-import { findOpenLibrarySeries } from "@/lib/books/providers/open-library";
+import { findOpenLibrarySeries, fetchOpenLibrarySeriesLineup } from "@/lib/books/providers/open-library";
+import { findHardcoverSeries, fetchHardcoverSeriesLineup } from "@/lib/books/providers/hardcover";
+import type { NormalizedBook, SeriesProviderSource } from "@/lib/books/types";
 import { logger } from "@/lib/logger";
 
 const SCOPE = "series-sync";
+
+/** Re-exported so callers (e.g. lib/queries.ts) don't need to know this
+ * type actually lives in lib/books/types.ts. */
+export type ProviderSource = SeriesProviderSource;
+
+interface FoundSeries {
+  seriesName: string;
+  seriesPosition?: number;
+  source: ProviderSource;
+  sourceId: string;
+}
+
+/** Tries Open Library's title/author match, then Hardcover's — Hardcover
+ * is specifically strong on the indie/romance/romantasy titles Open
+ * Library tends to have nothing on at all, verified against real
+ * responses for a batch of series neither our ISBN lookup nor Open
+ * Library's own fallback could place. */
+async function findSeriesAnyProvider(book: {
+  isbn?: string;
+  title: string;
+  authors: string[];
+}): Promise<FoundSeries | null> {
+  const ol = await findOpenLibrarySeries(book);
+  if (ol) {
+    return { seriesName: ol.seriesName, seriesPosition: ol.seriesPosition, source: "openlibrary", sourceId: ol.seriesKey };
+  }
+  const hc = await findHardcoverSeries(book);
+  if (hc) {
+    return { seriesName: hc.seriesName, seriesPosition: hc.seriesPosition, source: "hardcover", sourceId: hc.seriesId };
+  }
+  return null;
+}
 
 /** New volumes get released, so a cached lineup can't live forever. A
  * lineup that came back empty is retried much sooner — it usually means
@@ -19,8 +53,6 @@ const EMPTY_LINEUP_TTL_MS = 60 * 60 * 1000;
 const FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 const lastFailureAt = new Map<string, number>();
 
-const OPEN_LIBRARY = "openlibrary";
-
 /**
  * Finds the series row for a name — or, better, for an Open Library series
  * key, which identifies a series exactly regardless of how it's spelled.
@@ -29,19 +61,20 @@ const OPEN_LIBRARY = "openlibrary";
  */
 export async function findOrCreateSeries(
   name: string,
-  openLibraryKey?: string
+  providerRef?: { source: ProviderSource; id: string }
 ): Promise<string> {
   const sameName = sql`lower(${series.name}) = ${name.toLowerCase()}`;
 
-  if (openLibraryKey) {
+  if (providerRef) {
+    const { source, id: sourceId } = providerRef;
     const byKey = () =>
       db.query.series.findFirst({
-        where: and(eq(series.source, OPEN_LIBRARY), eq(series.sourceId, openLibraryKey)),
+        where: and(eq(series.source, source), eq(series.sourceId, sourceId)),
       });
 
     const keyed = await byKey();
     if (keyed) {
-      logger.info(SCOPE, "matched existing series by key", { name, seriesId: keyed.id, openLibraryKey });
+      logger.info(SCOPE, "matched existing series by key", { name, seriesId: keyed.id, source, sourceId });
       return keyed.id;
     }
 
@@ -52,29 +85,30 @@ export async function findOrCreateSeries(
       try {
         await db
           .update(series)
-          .set({ source: OPEN_LIBRARY, sourceId: openLibraryKey, lookedUpAt: null })
+          .set({ source, sourceId, lookedUpAt: null })
           .where(eq(series.id, adoptable.id));
-        logger.info(SCOPE, "adopted name-only series into open library key", {
+        logger.info(SCOPE, "adopted name-only series into provider key", {
           name,
           seriesId: adoptable.id,
-          openLibraryKey,
+          source,
+          sourceId,
         });
         return adoptable.id;
       } catch {
         // Lost a race with another writer claiming this key — use theirs.
         const raced = await byKey();
         if (raced) return raced.id;
-        throw new Error(`Could not claim series key ${openLibraryKey}`);
+        throw new Error(`Could not claim series key ${source}:${sourceId}`);
       }
     }
 
     const id = nanoid();
     await db
       .insert(series)
-      .values({ id, name, source: OPEN_LIBRARY, sourceId: openLibraryKey })
+      .values({ id, name, source, sourceId })
       .onConflictDoNothing();
     const created = await byKey();
-    logger.info(SCOPE, "created new series with key", { name, seriesId: created?.id, openLibraryKey });
+    logger.info(SCOPE, "created new series with key", { name, seriesId: created?.id, source, sourceId });
     return created!.id;
   }
 
@@ -95,42 +129,74 @@ export async function findOrCreateSeries(
  * books already filed under it. Returns the key, or null if none of them
  * resolves (or another row already owns that key).
  */
-export async function resolveSeriesKey(seriesId: string): Promise<string | null> {
+export async function resolveSeriesSource(
+  seriesId: string
+): Promise<{ source: ProviderSource; id: string } | null> {
   const members = await db.query.book.findMany({
     where: eq(book.seriesId, seriesId),
     limit: 3,
   });
 
   for (const m of members) {
-    const found = await findOpenLibrarySeries({
-      isbn: m.isbn13 ?? m.isbn10 ?? undefined,
-      title: m.title,
-      authors: m.authors,
-    });
-    if (!found) continue;
+    const book_ = { isbn: m.isbn13 ?? m.isbn10 ?? undefined, title: m.title, authors: m.authors };
+    const [ol, hc] = await Promise.all([
+      findOpenLibrarySeries(book_),
+      findHardcoverSeries(book_),
+    ]);
+    if (!ol && !hc) continue;
+
+    // Both resolved — rather than always preferring one provider, check
+    // which actually has the more complete lineup for this series and
+    // use that one. Only costs the extra round trip once, here, not on
+    // every subsequent cached-lineup read.
+    let chosen: { source: ProviderSource; id: string; name: string };
+    if (ol && hc) {
+      const [olLineup, hcLineup] = await Promise.all([
+        fetchOpenLibrarySeriesLineup(ol.seriesKey),
+        fetchHardcoverSeriesLineup(hc.seriesId),
+      ]);
+      const olCount = olLineup?.length ?? 0;
+      const hcCount = hcLineup?.length ?? 0;
+      chosen =
+        hcCount > olCount
+          ? { source: "hardcover", id: hc.seriesId, name: hc.seriesName }
+          : { source: "openlibrary", id: ol.seriesKey, name: ol.seriesName };
+      logger.info(SCOPE, "both providers resolved a series, picked the bigger lineup", {
+        seriesId,
+        olCount,
+        hcCount,
+        picked: chosen.source,
+      });
+    } else if (ol) {
+      chosen = { source: "openlibrary", id: ol.seriesKey, name: ol.seriesName };
+    } else {
+      chosen = { source: "hardcover", id: hc!.seriesId, name: hc!.seriesName };
+    }
 
     try {
       await db
         .update(series)
-        .set({ source: OPEN_LIBRARY, sourceId: found.seriesKey, lookedUpAt: null })
+        .set({ source: chosen.source, sourceId: chosen.id, lookedUpAt: null })
         .where(and(eq(series.id, seriesId), isNull(series.source)));
     } catch {
       logger.warn(SCOPE, "series key already belongs to another series row", {
         seriesId,
-        seriesKey: found.seriesKey,
+        source: chosen.source,
+        sourceId: chosen.id,
       });
       return null;
     }
-    logger.info(SCOPE, "resolved series key from member book", {
+    logger.info(SCOPE, "resolved series source from member book", {
       seriesId,
       bookId: m.id,
-      seriesKey: found.seriesKey,
-      openLibraryName: found.seriesName,
+      source: chosen.source,
+      sourceId: chosen.id,
+      resolvedName: chosen.name,
     });
-    return found.seriesKey;
+    return { source: chosen.source, id: chosen.id };
   }
 
-  logger.info(SCOPE, "could not resolve series key", { seriesId, membersTried: members.length });
+  logger.info(SCOPE, "could not resolve series source", { seriesId, membersTried: members.length });
   return null;
 }
 
@@ -159,13 +225,22 @@ export async function backfillBookSeries(bookRow: {
   }
 
   const fresh = await lookupByIsbn(isbn);
-  // No provider knows this ISBN at all — still worth asking Open Library
-  // about the title and author we have stored.
-  const found = fresh
-    ? fresh.seriesName
-      ? { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition, seriesKey: fresh.seriesKey }
-      : null
-    : await findOpenLibrarySeries({ title: bookRow.title, authors: bookRow.authors });
+  // Either no provider knows this ISBN at all, or one does but without
+  // series info — lookupByIsbn already tries its own Open Library
+  // title/author fallback internally, but it has to use whatever title
+  // that provider returned, which can differ just enough from what we
+  // have stored (e.g. "Twisted Love" vs a foreign edition's own title
+  // text) to miss where a fallback keyed off our own stored title would
+  // succeed. Worth trying harder — our own title/author against BOTH
+  // Open Library and Hardcover — before giving up. Hardcover in
+  // particular carries series data for a lot of the indie/romance
+  // catalog Open Library simply doesn't index at all.
+  const found: FoundSeries | { seriesName: string; seriesPosition?: number } | null =
+    fresh?.seriesName
+      ? fresh.seriesKey
+        ? { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition, source: "openlibrary", sourceId: fresh.seriesKey }
+        : { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition }
+      : await findSeriesAnyProvider({ title: bookRow.title, authors: bookRow.authors });
 
   await db.update(book).set({ seriesCheckedAt: new Date() }).where(eq(book.id, bookRow.id));
 
@@ -179,7 +254,10 @@ export async function backfillBookSeries(bookRow: {
     return false;
   }
 
-  const seriesId = await findOrCreateSeries(found.seriesName, found.seriesKey);
+  const seriesId = await findOrCreateSeries(
+    found.seriesName,
+    "source" in found ? { source: found.source, id: found.sourceId } : undefined
+  );
   await db
     .update(book)
     .set({
@@ -193,10 +271,66 @@ export async function backfillBookSeries(bookRow: {
     bookId: bookRow.id,
     isbn,
     seriesName: found.seriesName,
-    seriesKey: found.seriesKey ?? null,
+    source: "source" in found ? found.source : null,
+    sourceId: "source" in found ? found.sourceId : null,
     seriesPosition: found.seriesPosition ?? null,
   });
   return true;
+}
+
+/**
+ * Opportunistic backfill from a search result that arrived too late to
+ * make it into the response a user was actually waiting on (Open Library
+ * dropped by the interactive grace period — see searchBooksFull's
+ * lateOpenLibrary). Nothing the user did is blocked on this; it just
+ * quietly fixes up any of their already-added books that this late data
+ * happens to answer, matched by ISBN since that's exact regardless of
+ * title/author text differences between providers.
+ */
+export async function backfillFromLateResults(
+  lateBooks: NormalizedBook[]
+): Promise<number> {
+  let backfilled = 0;
+  for (const lb of lateBooks) {
+    if (!lb.seriesName) continue;
+    const isbn13 = lb.isbn13;
+    const isbn10 = lb.isbn10;
+    if (!isbn13 && !isbn10) continue;
+
+    const matches = await db.query.book.findMany({
+      where: and(
+        isNull(book.seriesId),
+        or(
+          isbn13 ? eq(book.isbn13, isbn13) : undefined,
+          isbn10 ? eq(book.isbn10, isbn10) : undefined
+        )
+      ),
+    });
+    if (!matches.length) continue;
+
+    const seriesId = await findOrCreateSeries(
+      lb.seriesName,
+      lb.seriesKey ? { source: "openlibrary", id: lb.seriesKey } : undefined
+    );
+    for (const m of matches) {
+      await db
+        .update(book)
+        .set({
+          seriesId,
+          seriesPosition: lb.seriesPosition?.toString(),
+          updatedAt: new Date(),
+        })
+        .where(eq(book.id, m.id));
+      backfilled++;
+      logger.info(SCOPE, "backfilled series from a late-arriving search result", {
+        bookId: m.id,
+        title: m.title,
+        seriesName: lb.seriesName,
+        isbn: isbn13 ?? isbn10,
+      });
+    }
+  }
+  return backfilled;
 }
 
 /**
@@ -229,10 +363,15 @@ export async function ensureSeriesLineup(
     return cached;
   }
 
-  let openLibraryKey = current.source === OPEN_LIBRARY ? current.sourceId : null;
-  if (!openLibraryKey) openLibraryKey = await resolveSeriesKey(seriesId);
+  let source = current.source as ProviderSource | null;
+  let sourceId = current.sourceId;
+  if (!source || !sourceId) {
+    const resolved = await resolveSeriesSource(seriesId);
+    source = resolved?.source ?? null;
+    sourceId = resolved?.id ?? null;
+  }
 
-  const volumes = await discoverSeriesVolumes({ name, openLibraryKey });
+  const volumes = await discoverSeriesVolumes({ name, source, sourceId });
   if (!volumes) {
     lastFailureAt.set(seriesId, now);
     logger.warn(SCOPE, "lineup lookup failed, keeping cached lineup", {
@@ -255,8 +394,9 @@ export async function ensureSeriesLineup(
   logger.info(SCOPE, "lineup discovered and cached", {
     seriesId,
     name,
-    method: openLibraryKey ? "open-library-series-key" : "name-search",
-    openLibraryKey,
+    method: source ? `${source}-key` : "name-search",
+    source,
+    sourceId,
     volumesFound: volumes.length,
     expectedCount,
     positions: volumes.map((v) => v.position),

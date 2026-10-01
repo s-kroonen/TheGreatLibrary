@@ -1,5 +1,9 @@
 export type BookSource = "googlebooks" | "openlibrary" | "manual";
 
+/** External sources used specifically for series detection (not the main
+ * book search/add pipeline above) — see lib/series-sync.ts. */
+export type SeriesProviderSource = "openlibrary" | "hardcover";
+
 /** A normalized book record, regardless of which external source it came from. */
 export interface NormalizedBook {
   source: BookSource;
@@ -35,8 +39,21 @@ export interface NormalizedBook {
   seriesKey?: string;
 }
 
+export interface SearchOptions {
+  /** Overrides the provider's default per-request timeout. Interactive
+   * search keeps it short so the user isn't left staring at a spinner;
+   * background checks (series lineup discovery, boot-time backfill —
+   * nothing the user is watching) can afford to wait longer for a
+   * complete answer instead of risking a fast-but-wrong one. */
+  timeoutMs?: number;
+}
+
 export interface BookProvider {
   name: BookSource;
-  search(query: string, limit?: number): Promise<NormalizedBook[]>;
+  search(
+    query: string,
+    limit?: number,
+    opts?: SearchOptions
+  ): Promise<NormalizedBook[]>;
   lookupByIsbn(isbn: string): Promise<NormalizedBook | null>;
 }

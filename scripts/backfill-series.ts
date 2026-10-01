@@ -17,7 +17,7 @@ import { and, isNull, lt, or, isNotNull } from "drizzle-orm";
 
 import { db } from "../db";
 import { book, series } from "../db/schema";
-import { backfillBookSeries, resolveSeriesKey } from "../lib/series-sync";
+import { backfillBookSeries, resolveSeriesSource } from "../lib/series-sync";
 import { logger } from "../lib/logger";
 
 const SCOPE = "backfill-series";
@@ -28,7 +28,7 @@ async function resolveKeylessSeries() {
   let resolved = 0;
   for (const s of keyless) {
     try {
-      if (await resolveSeriesKey(s.id)) resolved++;
+      if (await resolveSeriesSource(s.id)) resolved++;
     } catch (err) {
       logger.error(SCOPE, "series key resolution failed", {
         seriesId: s.id,
