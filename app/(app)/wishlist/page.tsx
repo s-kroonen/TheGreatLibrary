@@ -1,13 +1,13 @@
-import { requireUser } from "@/lib/session";
+import { requirePageUser } from "@/lib/session";
 import { getUserBooks, getWishlistShare } from "@/lib/queries";
 import { WishlistView } from "@/components/wishlist-view";
 import { ShareWishlistDialog } from "@/components/share-wishlist-dialog";
 
 export default async function WishlistPage() {
-  const user = await requireUser();
-  const books = await getUserBooks(user!.id);
+  const user = await requirePageUser();
+  const books = await getUserBooks(user.id);
   const wishlist = books.filter((b) => b.status === "wishlist");
-  const shareToken = await getWishlistShare(user!.id);
+  const shareToken = await getWishlistShare(user.id);
 
   return (
     <div className="flex flex-col gap-6">

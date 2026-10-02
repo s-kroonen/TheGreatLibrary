@@ -1,12 +1,12 @@
 import { Library } from "lucide-react";
 
-import { requireUser } from "@/lib/session";
+import { requirePageUser } from "@/lib/session";
 import { getSeriesOverview } from "@/lib/queries";
 import { SeriesList } from "@/components/series-list";
 
 export default async function SeriesPage() {
-  const user = await requireUser();
-  const series = await getSeriesOverview(user!.id);
+  const user = await requirePageUser();
+  const series = await getSeriesOverview(user.id);
 
   return (
     <div className="flex flex-col gap-6">

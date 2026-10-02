@@ -1,14 +1,14 @@
 import Link from "next/link";
 import { BookOpen, Plus } from "lucide-react";
 
-import { requireUser } from "@/lib/session";
+import { requirePageUser } from "@/lib/session";
 import { getUserBooks } from "@/lib/queries";
 import { BookGrid } from "@/components/book-grid";
 import { Button } from "@/components/ui/button";
 
 export default async function ShelfPage() {
-  const user = await requireUser();
-  const books = await getUserBooks(user!.id);
+  const user = await requirePageUser();
+  const books = await getUserBooks(user.id);
   const owned = books.filter((b) => b.status !== "wishlist");
 
   return (

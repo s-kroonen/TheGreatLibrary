@@ -1,14 +1,14 @@
 import { Sparkles } from "lucide-react";
 
-import { requireUser } from "@/lib/session";
+import { requirePageUser } from "@/lib/session";
 import { getStats, getUserBooks } from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 export default async function StatsPage() {
-  const user = await requireUser();
-  const stats = await getStats(user!.id);
-  const books = await getUserBooks(user!.id);
+  const user = await requirePageUser();
+  const stats = await getStats(user.id);
+  const books = await getUserBooks(user.id);
 
   const moodCounts = new Map<string, number>();
   for (const ub of books) {
