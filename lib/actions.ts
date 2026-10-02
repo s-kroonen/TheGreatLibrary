@@ -151,7 +151,8 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
     if (!existing.seriesId && normalized.seriesName) {
       const seriesId = await findOrCreateSeries(
         normalized.seriesName,
-        normalized.seriesKey ? { source: "openlibrary", id: normalized.seriesKey } : undefined
+        normalized.seriesKey ? { source: "openlibrary", id: normalized.seriesKey } : undefined,
+        normalized.authors
       );
       await db
         .update(book)
@@ -170,17 +171,14 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
       // The search result itself had no series signal, but a deeper
       // ISBN-based lookup (Open Library Work-level record, etc.) might
       // still find one — the same fallback "Refresh from source" uses.
-      const isbn = existing.isbn13 ?? existing.isbn10;
-      const backfilled = isbn
-        ? await backfillBookSeries({
-            id: existing.id,
-            title: existing.title,
-            authors: existing.authors,
-            isbn13: existing.isbn13,
-            isbn10: existing.isbn10,
-            seriesId: existing.seriesId,
-          })
-        : false;
+      const backfilled = await backfillBookSeries({
+        id: existing.id,
+        title: existing.title,
+        authors: existing.authors,
+        isbn13: existing.isbn13,
+        isbn10: existing.isbn10,
+        seriesId: existing.seriesId,
+      });
       logger.info(SCOPE, "upsertBook found existing book, still no series detected", {
         bookId: existing.id,
         title: normalized.title,
@@ -195,7 +193,8 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
   if (normalized.seriesName) {
     seriesId = await findOrCreateSeries(
       normalized.seriesName,
-      normalized.seriesKey ? { source: "openlibrary", id: normalized.seriesKey } : undefined
+      normalized.seriesKey ? { source: "openlibrary", id: normalized.seriesKey } : undefined,
+      normalized.authors
     );
   } else {
     logger.info(SCOPE, "upsertBook: no series detected on new book", {
@@ -229,7 +228,7 @@ async function upsertBook(normalized: NormalizedBook): Promise<string> {
   // Same fallback as above, for the freshly-inserted-book case: the
   // search result had no series signal, but a deeper ISBN lookup might.
   // One extra lookup for the book just added, not for every search result.
-  if (!seriesId && (normalized.isbn13 ?? normalized.isbn10)) {
+  if (!seriesId) {
     const backfilled = await backfillBookSeries({
       id,
       title: normalized.title,
@@ -404,7 +403,8 @@ export async function refreshBookFromSourceAction(bookId: string) {
     !existing.seriesId && fresh.seriesName
       ? await findOrCreateSeries(
           fresh.seriesName,
-          fresh.seriesKey ? { source: "openlibrary", id: fresh.seriesKey } : undefined
+          fresh.seriesKey ? { source: "openlibrary", id: fresh.seriesKey } : undefined,
+          fresh.authors
         )
       : existing.seriesId;
 

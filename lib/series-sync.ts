@@ -1,9 +1,10 @@
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { db } from "@/db";
 import { book, series, type SeriesVolume } from "@/db/schema";
 import { discoverSeriesVolumes } from "@/lib/books/series-lookup";
+import { sharesAuthor } from "@/lib/books/match";
 import { lookupByIsbn } from "@/lib/books/search";
 import { findOpenLibrarySeries, fetchOpenLibrarySeriesLineup } from "@/lib/books/providers/open-library";
 import { findHardcoverSeries, fetchHardcoverSeriesLineup } from "@/lib/books/providers/hardcover";
@@ -61,7 +62,8 @@ const lastFailureAt = new Map<string, number>();
  */
 export async function findOrCreateSeries(
   name: string,
-  providerRef?: { source: ProviderSource; id: string }
+  providerRef?: { source: ProviderSource; id: string },
+  authors: string[] = []
 ): Promise<string> {
   const sameName = sql`lower(${series.name}) = ${name.toLowerCase()}`;
 
@@ -76,6 +78,32 @@ export async function findOrCreateSeries(
     if (keyed) {
       logger.info(SCOPE, "matched existing series by key", { name, seriesId: keyed.id, source, sourceId });
       return keyed.id;
+    }
+
+    // The same series often exists under BOTH providers with different ids
+    // ("Shatter Me" is an Open Library series and a Hardcover series), and
+    // different books of it can resolve through different ones. Keyed only
+    // by provider+id that would create two cards for one series, so reuse
+    // an existing same-name row from the OTHER provider when one of its
+    // books shares an author with this one — name alone isn't enough
+    // (unrelated series share names), and with no author we can't tell.
+    if (authors.length) {
+      const sameNameOtherProvider = await db.query.series.findMany({
+        where: and(sameName, sql`${series.source} is not null`, ne(series.source, source)),
+        with: { books: true },
+      });
+      const twin = sameNameOtherProvider.find((s) =>
+        s.books.some((b) => b.authors.length > 0 && sharesAuthor(b.authors, authors))
+      );
+      if (twin) {
+        logger.info(SCOPE, "matched same series under the other provider", {
+          name,
+          seriesId: twin.id,
+          existing: `${twin.source}:${twin.sourceId}`,
+          incoming: `${source}:${sourceId}`,
+        });
+        return twin.id;
+      }
     }
 
     const adoptable = await db.query.series.findFirst({
@@ -222,13 +250,18 @@ export async function backfillBookSeries(
     logger.info(SCOPE, "backfill skipped, already linked", { bookId: bookRow.id });
     return false;
   }
-  const isbn = bookRow.isbn13 ?? bookRow.isbn10;
-  if (!isbn) {
-    logger.warn(SCOPE, "backfill skipped, no ISBN to look up", { bookId: bookRow.id });
-    return false;
-  }
+  // A lot of shelf books (imported, or added by title) have no ISBN at
+  // all. They used to be skipped outright, which silently left whole
+  // series undetected even though a title + author lookup resolves them
+  // fine — so go straight to that path instead of giving up.
+  const isbn = bookRow.isbn13 ?? bookRow.isbn10 ?? null;
 
-  const fresh = await lookupByIsbn(isbn, opts);
+  // Tracks whether any lookup below failed outright (as opposed to
+  // answering "no match") — see the seriesCheckedAt stamp further down.
+  let lookupFailed = false;
+  const checkedOpts: CacheOptions = { ...opts, onTransient: () => { lookupFailed = true; } };
+
+  const fresh = isbn ? await lookupByIsbn(isbn, checkedOpts) : null;
   // Either no provider knows this ISBN at all, or one does but without
   // series info — lookupByIsbn already tries its own Open Library
   // title/author fallback internally, but it has to use whatever title
@@ -244,9 +277,14 @@ export async function backfillBookSeries(
       ? fresh.seriesKey
         ? { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition, source: "openlibrary", sourceId: fresh.seriesKey }
         : { seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition }
-      : await findSeriesAnyProvider({ title: bookRow.title, authors: bookRow.authors }, opts);
+      : await findSeriesAnyProvider({ title: bookRow.title, authors: bookRow.authors }, checkedOpts);
 
-  await db.update(book).set({ seriesCheckedAt: new Date() }).where(eq(book.id, bookRow.id));
+  // Only count this as a real check if every lookup actually answered —
+  // a 429 or timeout isn't evidence the book has no series, and stamping
+  // it would put it in a 7-day cooldown it never earned.
+  if (!lookupFailed) {
+    await db.update(book).set({ seriesCheckedAt: new Date() }).where(eq(book.id, bookRow.id));
+  }
 
   if (!found) {
     logger.warn(SCOPE, "backfill found no series from any provider", {
@@ -254,13 +292,15 @@ export async function backfillBookSeries(
       title: bookRow.title,
       isbn,
       lookupSucceeded: !!fresh,
+      lookupFailed,
     });
     return false;
   }
 
   const seriesId = await findOrCreateSeries(
     found.seriesName,
-    "source" in found ? { source: found.source, id: found.sourceId } : undefined
+    "source" in found ? { source: found.source, id: found.sourceId } : undefined,
+    bookRow.authors
   );
   await db
     .update(book)
@@ -314,7 +354,8 @@ export async function backfillFromLateResults(
 
     const seriesId = await findOrCreateSeries(
       lb.seriesName,
-      lb.seriesKey ? { source: "openlibrary", id: lb.seriesKey } : undefined
+      lb.seriesKey ? { source: "openlibrary", id: lb.seriesKey } : undefined,
+      lb.authors
     );
     for (const m of matches) {
       await db

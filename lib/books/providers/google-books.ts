@@ -1,5 +1,6 @@
 import type { BookProvider, NormalizedBook, SearchOptions } from "../types";
 import { parseSeriesFromTitle } from "../series";
+import { TransientProviderError } from "../provider-cache";
 import { logger } from "@/lib/logger";
 
 const SCOPE = "provider:google";
@@ -136,7 +137,9 @@ export const googleBooksProvider: BookProvider = {
           status: res.status,
           durationMs,
         });
-        return null;
+        // A failed request is not "this ISBN doesn't exist" — see
+        // TransientProviderError (lookups get cached for days).
+        throw new TransientProviderError(`google books lookupByIsbn ${res.status}`);
       }
 
       const data = (await res.json()) as { items?: GoogleVolume[] };
@@ -150,11 +153,12 @@ export const googleBooksProvider: BookProvider = {
       });
       return result;
     } catch (err) {
+      if (err instanceof TransientProviderError) throw err;
       logger.warn(SCOPE, "lookupByIsbn errored", {
         isbn,
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
+      throw new TransientProviderError("google books lookupByIsbn errored");
     }
   },
 };

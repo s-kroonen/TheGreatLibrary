@@ -1,7 +1,7 @@
 import type { BookProvider, NormalizedBook } from "../types";
 import { parseSeriesField, parseSeriesFromTitle } from "../series";
-import { isCollectionListing, sharesAuthor, titleStem } from "../match";
-import { withCache, TTL, type CacheOptions } from "../provider-cache";
+import { isCollectionListing, sharesAuthor, titleMatches, titleStem } from "../match";
+import { withCache, swallowTransient, TransientProviderError, TTL, type CacheOptions } from "../provider-cache";
 import { logger } from "@/lib/logger";
 import type { SeriesVolume } from "@/db/schema";
 
@@ -152,7 +152,7 @@ export async function findOpenLibrarySeries(
   opts: CacheOptions = {}
 ): Promise<ResolvedSeries | null> {
   const key = `${book.isbn ?? "-"}|${titleStem(book.title)}|${(book.authors[0] ?? "").toLowerCase()}`;
-  return withCache("openlibrary", "series-by-book", key, TTL.SERIES, () => findOpenLibrarySeriesUncached(book), opts);
+  return swallowTransient(withCache("openlibrary", "series-by-book", key, TTL.SERIES, () => findOpenLibrarySeriesUncached(book), opts), opts.onTransient);
 }
 
 async function findOpenLibrarySeriesUncached(book: {
@@ -168,7 +168,7 @@ async function findOpenLibrarySeriesUncached(book: {
       const n = normalize(doc);
       if (!n.seriesKey || !n.seriesName) continue;
       if (via === "title-author") {
-        if (titleStem(n.title) !== titleStem(book.title)) continue;
+        if (!titleMatches(n.title, book.title)) continue;
         if (!sharesAuthor(n.authors, book.authors)) continue;
       }
       return {
@@ -183,7 +183,9 @@ async function findOpenLibrarySeriesUncached(book: {
 
   if (book.isbn) {
     const docs = await querySearch({ isbn: book.isbn, fields: DOC_FIELDS }, "series-by-isbn");
-    const hit = docs && pick(docs, "isbn");
+    // null means the request failed, not "no match" — never cache that.
+    if (docs === null) throw new TransientProviderError("open library series-by-isbn unavailable");
+    const hit = pick(docs, "isbn");
     if (hit) {
       logger.info(SCOPE, "resolved series", { ...hit, isbn: book.isbn, durationMs: Date.now() - start });
       return hit;
@@ -197,7 +199,8 @@ async function findOpenLibrarySeriesUncached(book: {
   };
   if (book.authors[0]) params.author = book.authors[0];
   const docs = await querySearch(params, "series-by-title-author");
-  const hit = docs && pick(docs, "title-author");
+  if (docs === null) throw new TransientProviderError("open library series-by-title-author unavailable");
+  const hit = pick(docs, "title-author");
   logger.info(SCOPE, hit ? "resolved series" : "no series found", {
     title: book.title,
     author: book.authors[0] ?? null,
@@ -221,7 +224,7 @@ export async function fetchOpenLibrarySeriesLineup(
   seriesKey: string,
   opts: CacheOptions = {}
 ): Promise<SeriesVolume[] | null> {
-  return withCache("openlibrary", "lineup", seriesKey, TTL.LINEUP, () => fetchOpenLibrarySeriesLineupUncached(seriesKey), opts);
+  return swallowTransient(withCache("openlibrary", "lineup", seriesKey, TTL.LINEUP, () => fetchOpenLibrarySeriesLineupUncached(seriesKey), opts), opts.onTransient);
 }
 
 async function fetchOpenLibrarySeriesLineupUncached(seriesKey: string): Promise<SeriesVolume[] | null> {
@@ -235,7 +238,7 @@ async function fetchOpenLibrarySeriesLineupUncached(seriesKey: string): Promise<
     "series lineup",
     { timeoutMs: 8000 }
   );
-  if (!docs) return null;
+  if (!docs) throw new TransientProviderError("open library series lineup unavailable");
 
   // If two works claim the same position (duplicate works for different
   // editions), keep the one with the most editions — the canonical one.
@@ -310,7 +313,7 @@ export const openLibraryProvider: BookProvider = {
   async lookupByIsbn(isbn) {
     const start = Date.now();
     const docs = await querySearch({ isbn, fields: DOC_FIELDS }, "lookupByIsbn");
-    if (!docs) return null;
+    if (!docs) throw new TransientProviderError("open library lookupByIsbn unavailable");
     const result = docs[0] ? normalize(docs[0]) : null;
     logger.info(SCOPE, "lookupByIsbn ok", {
       isbn,

@@ -30,12 +30,50 @@ function cacheId(provider: string, kind: string, key: string): string {
   return `${provider}:${kind}:${key}`;
 }
 
+/**
+ * Thrown by a provider fetcher when the request itself failed (timeout,
+ * 429, 5xx, network error) as opposed to succeeding with "no match". The
+ * distinction matters: withCache stores a successful "nothing found" for
+ * days, and a fetcher that threw is never stored — otherwise one flaky
+ * response (Google's 503s, a Hardcover 429) would be cached as a confirmed
+ * miss and the book left undetected until the entry expired. Use
+ * `swallowTransient` at the public boundary to turn it back into null.
+ */
+export class TransientProviderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientProviderError";
+  }
+}
+
+/** Resolves a lookup that may have thrown TransientProviderError to
+ * null (uncached, since withCache never stored it) — callers that just
+ * want "no answer right now" don't need to know the difference. */
+export async function swallowTransient<T>(
+  promise: Promise<T | null>,
+  onTransient?: () => void
+): Promise<T | null> {
+  try {
+    return await promise;
+  } catch (err) {
+    if (err instanceof TransientProviderError) {
+      onTransient?.();
+      return null;
+    }
+    throw err;
+  }
+}
+
 export interface CacheOptions {
   /** Bypasses both cache layers and always makes a fresh request — for
    * explicit user-triggered refreshes ("Refresh from source"), where a
    * stale cached answer would be exactly the wrong thing to show. The
    * fresh result still gets written back, same as any other fetch. */
   force?: boolean;
+  /** Called when the lookup failed transiently and resolved to null only
+   * because of that — lets a caller tell "no match" from "couldn't ask"
+   * (e.g. to avoid marking a book as checked when the check never ran). */
+  onTransient?: () => void;
 }
 
 export async function withCache<T>(

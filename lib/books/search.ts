@@ -2,7 +2,7 @@ import type { NormalizedBook } from "./types";
 import { googleBooksProvider } from "./providers/google-books";
 import { findOpenLibrarySeries, openLibraryProvider } from "./providers/open-library";
 import { mergeResults } from "./merge";
-import { withCache, TTL, type CacheOptions } from "./provider-cache";
+import { withCache, swallowTransient, TransientProviderError, TTL, type CacheOptions } from "./provider-cache";
 import { logger } from "@/lib/logger";
 
 const SCOPE = "search";
@@ -184,11 +184,12 @@ export async function lookupByIsbn(
   isbn: string,
   opts: CacheOptions = {}
 ): Promise<NormalizedBook | null> {
-  return withCache("search", "lookup-by-isbn", isbn, TTL.ISBN, () => lookupByIsbnUncached(isbn), opts);
+  return swallowTransient(withCache("search", "lookup-by-isbn", isbn, TTL.ISBN, () => lookupByIsbnUncached(isbn), opts), opts.onTransient);
 }
 
 async function lookupByIsbnUncached(isbn: string): Promise<NormalizedBook | null> {
   let found: NormalizedBook | null = null;
+  let anyProviderFailed = false;
   for (const provider of providers) {
     try {
       const book = await provider.lookupByIsbn(isbn);
@@ -198,11 +199,15 @@ async function lookupByIsbnUncached(isbn: string): Promise<NormalizedBook | null
       }
     } catch {
       // try next provider
+      anyProviderFailed = true;
     }
   }
 
   if (!found) {
-    logger.warn(SCOPE, "lookupByIsbn found nothing from any provider", { isbn });
+    logger.warn(SCOPE, "lookupByIsbn found nothing from any provider", { isbn, anyProviderFailed });
+    // If a provider errored out, "nothing found" is really "couldn't
+    // tell" — don't let withCache store it as a confirmed miss.
+    if (anyProviderFailed) throw new TransientProviderError(`lookupByIsbn ${isbn}: a provider failed`);
     return null;
   }
 

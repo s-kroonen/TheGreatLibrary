@@ -22,7 +22,7 @@
  * would now find them. Safe to leave off after a boot or two — once
  * everything's been retried, the cooldown is doing its normal job again.
  */
-import { and, isNull, lt, or, isNotNull } from "drizzle-orm";
+import { and, isNull, lt, or } from "drizzle-orm";
 
 import { db } from "../db";
 import { book, series } from "../db/schema";
@@ -60,7 +60,6 @@ async function main() {
   const orphaned = await db.query.book.findMany({
     where: and(
       isNull(book.seriesId),
-      or(isNotNull(book.isbn13), isNotNull(book.isbn10)),
       FORCE
         ? undefined
         : or(

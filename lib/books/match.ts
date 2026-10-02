@@ -12,7 +12,24 @@ function words(s: string): string {
 /** "Icebreaker: Deluxe Edition Hardcover" and "Icebreaker (Maple Hills, #1)"
  * both reduce to "icebreaker". */
 export function titleStem(title: string): string {
-  return words(title.split(/[:(]/)[0]);
+  // Leading articles are dropped so "The Striker" and "Striker" (shelf
+  // titles and catalogs disagree on this constantly) compare equal.
+  return words(title.split(/[:(]/)[0]).replace(/^(?:the|a|an)\s+(?=\S)/, "");
+}
+
+/** True if two titles plausibly name the same book. Beyond equal stems,
+ * also accepts a "Series: Subtitle" shelf title matching a provider's
+ * bare subtitle ("Zodiac Academy: Shadow Princess" vs "Shadow Princess")
+ * — common for self-published series, where the series name is prefixed
+ * onto each volume's title in some listings but not in the catalog. */
+export function titleMatches(a: string, b: string): boolean {
+  const stemA = titleStem(a);
+  const stemB = titleStem(b);
+  if (stemA && stemA === stemB) return true;
+  const subtitle = (t: string) => words(t.split(":").slice(1).join(" "));
+  const subA = subtitle(a);
+  const subB = subtitle(b);
+  return (!!subA && subA === stemB) || (!!subB && subB === stemA);
 }
 
 /** Full normalized title — keeps subtitles, so distinct editions stay distinct. */

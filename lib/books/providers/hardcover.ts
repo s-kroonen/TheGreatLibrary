@@ -14,8 +14,9 @@
  * when HARDCOVER_API_KEY isn't set, the same pattern as Google Books'
  * optional key.
  */
-import { isCollectionListing, sharesAuthor, titleStem } from "../match";
-import { withCache, TTL, type CacheOptions } from "../provider-cache";
+import { isCollectionListing, sharesAuthor, titleMatches, titleStem } from "../match";
+import { extractAnchoredPosition } from "../series";
+import { withCache, swallowTransient, TransientProviderError, TTL, type CacheOptions } from "../provider-cache";
 import { logger } from "@/lib/logger";
 import type { SeriesVolume } from "@/db/schema";
 
@@ -30,13 +31,16 @@ function apiKey(): string | null {
 // Free tier (confirmed on the account this was built against): 60
 // requests/min with a burst of 10, 5,000/day. A token bucket enforces the
 // per-minute shape client-side so we never fire the kind of burst that'd
-// otherwise get us 429'd — one token refills every second, up to 10
-// banked. The daily count is a best-effort safety margin on top of that:
+// otherwise get us 429'd. Deliberately budgets BELOW the published limits
+// (8 burst, 50/min): a full-speed run of the series backfill against a
+// real library still drew a 429 at the nominal 10/60, since Hardcover's
+// window isn't perfectly aligned with ours. The daily count is a
+// best-effort safety margin on top of that:
 // it resets on container restart (not persisted), so it undercounts
 // across restarts, but the real backstop is honoring 429 + Retry-After
 // below, which is authoritative regardless of what we've counted.
-const RATE_LIMIT_BURST = 10;
-const RATE_LIMIT_PER_MIN = 60;
+const RATE_LIMIT_BURST = 8;
+const RATE_LIMIT_PER_MIN = 50;
 const DAILY_LIMIT = 5000;
 const DAILY_SAFETY_MARGIN = 200; // stop ourselves well short of the real cap
 
@@ -91,6 +95,11 @@ interface GraphQLResponse<T> {
   errors?: { message: string }[];
 }
 
+/** Returns null when the request couldn't be completed (no key, spent
+ * daily budget, 429 after a retry, timeout, HTTP/GraphQL error) — never
+ * for a successful response, even one with no matches. Callers that cache
+ * results should use graphqlRequired, which turns null into a thrown
+ * TransientProviderError so a failure is never stored as an answer. */
 async function graphql<T>(
   query: string,
   variables: Record<string, unknown>,
@@ -99,54 +108,76 @@ async function graphql<T>(
 ): Promise<T | null> {
   const key = apiKey();
   if (!key) return null;
-  if (!(await acquireSlot())) return null;
 
-  const start = Date.now();
-  try {
-    const res = await fetch(ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-        // Hardcover's own docs recommend this for scripts/tools hitting
-        // the API, to help them reach heavy or misbehaving users.
-        "User-Agent": "TheGreatLibrary/1.0 (+https://github.com/s-kroonen/TheGreatLibrary)",
-      },
-      body: JSON.stringify({ query, variables }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const durationMs = Date.now() - start;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!(await acquireSlot())) return null;
 
-    if (res.status === 429) {
-      const retryAfterSec = Number(res.headers.get("Retry-After") ?? 30);
-      cooldownUntil = Date.now() + retryAfterSec * 1000;
-      logger.warn(SCOPE, `${label} rate limited by Hardcover`, { durationMs, retryAfterSec });
-      return null;
-    }
+    const start = Date.now();
+    try {
+      const res = await fetch(ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+          // Hardcover's own docs recommend this for scripts/tools hitting
+          // the API, to help them reach heavy or misbehaving users.
+          "User-Agent": "TheGreatLibrary/1.0 (+https://github.com/s-kroonen/TheGreatLibrary)",
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const durationMs = Date.now() - start;
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      logger.warn(SCOPE, `${label} failed`, { status: res.status, durationMs, body: body.slice(0, 300) });
-      return null;
-    }
+      if (res.status === 429) {
+        const retryAfterSec = Math.min(15, Number(res.headers.get("Retry-After") ?? 5) || 5);
+        cooldownUntil = Date.now() + (retryAfterSec + 0.5) * 1000;
+        logger.warn(SCOPE, `${label} rate limited by Hardcover`, {
+          durationMs,
+          retryAfterSec,
+          willRetry: attempt === 0,
+        });
+        continue; // acquireSlot() waits out the cooldown, then one retry
+      }
 
-    const json = (await res.json()) as GraphQLResponse<T>;
-    if (json.errors?.length) {
-      logger.warn(SCOPE, `${label} returned errors`, {
-        durationMs,
-        errors: json.errors.map((e) => e.message),
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        logger.warn(SCOPE, `${label} failed`, { status: res.status, durationMs, body: body.slice(0, 300) });
+        return null;
+      }
+
+      const json = (await res.json()) as GraphQLResponse<T>;
+      if (json.errors?.length) {
+        logger.warn(SCOPE, `${label} returned errors`, {
+          durationMs,
+          errors: json.errors.map((e) => e.message),
+        });
+        return null;
+      }
+      return json.data ?? null;
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "TimeoutError";
+      logger.warn(SCOPE, isTimeout ? `${label} timed out` : `${label} errored`, {
+        durationMs: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
       });
       return null;
     }
-    return json.data ?? null;
-  } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "TimeoutError";
-    logger.warn(SCOPE, isTimeout ? `${label} timed out` : `${label} errored`, {
-      durationMs: Date.now() - start,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
   }
+  return null;
+}
+
+/** graphql(), but a failed request throws instead of returning null —
+ * for the cached lookups, where null would otherwise be stored as "this
+ * book has no series" for days. */
+async function graphqlRequired<T>(
+  query: string,
+  variables: Record<string, unknown>,
+  label: string,
+  timeoutMs?: number
+): Promise<T> {
+  const data = await graphql<T>(query, variables, label, timeoutMs);
+  if (data === null) throw new TransientProviderError(`hardcover ${label} unavailable`);
+  return data;
 }
 
 // ---------- Per-book series resolution (search, Typesense-backed) ----------
@@ -171,7 +202,7 @@ interface SearchData {
 
 const SEARCH_QUERY = `
   query SearchBooks($query: String!) {
-    search(query: $query, query_type: "Book", per_page: 5, page: 1) {
+    search(query: $query, query_type: "Book", per_page: 10, page: 1) {
       results
     }
   }
@@ -182,7 +213,7 @@ const SEARCH_QUERY = `
  * is `{ results: { hits: [{ document: {...} }] } }` rather than a plain
  * list, confirmed against their docs' example responses. */
 async function searchBooksRaw(query: string): Promise<HardcoverBookSearchResult[]> {
-  const data = await graphql<SearchData>(SEARCH_QUERY, { query }, "book search");
+  const data = await graphqlRequired<SearchData>(SEARCH_QUERY, { query }, "book search");
   return (data?.search?.results?.hits ?? [])
     .map((h) => h.document)
     .filter((d): d is HardcoverBookSearchResult => !!d);
@@ -206,7 +237,7 @@ export async function findHardcoverSeries(
 ): Promise<ResolvedHardcoverSeries | null> {
   if (!apiKey()) return null;
   const key = `${book.isbn ?? "-"}|${titleStem(book.title)}|${(book.authors[0] ?? "").toLowerCase()}`;
-  return withCache("hardcover", "series-by-book", key, TTL.SERIES, () => findHardcoverSeriesUncached(book), opts);
+  return swallowTransient(withCache("hardcover", "series-by-book", key, TTL.SERIES, () => findHardcoverSeriesUncached(book), opts), opts.onTransient);
 }
 
 async function findHardcoverSeriesUncached(book: {
@@ -224,13 +255,24 @@ async function findHardcoverSeriesUncached(book: {
       if (!hit.title || isCollectionListing(hit.title)) continue;
       const series = hit.featured_series?.series;
       if (!series?.name || series.id === undefined) continue;
+
+      let position = hit.featured_series_position ?? undefined;
       if (via === "title-author") {
-        if (titleStem(hit.title) !== titleStem(book.title)) continue;
         if (!sharesAuthor(hit.author_names ?? [], book.authors)) continue;
+        if (!titleMatches(hit.title, book.title)) {
+          // Not the same book by title — but a shelf title that numbers
+          // itself off this very series ("Zodiac Academy 2", where the
+          // catalog calls book 2 "Ruthless Fae") still pins down both
+          // the series and the position. Requires a real author match,
+          // not just the "nothing to contradict" pass for empty authors.
+          const anchored = extractAnchoredPosition(book.title, series.name);
+          if (anchored === undefined || book.authors.length === 0) continue;
+          position = anchored;
+        }
       }
       return {
         seriesName: series.name,
-        seriesPosition: hit.featured_series_position ?? undefined,
+        seriesPosition: position,
         seriesId: String(series.id),
         via,
       };
@@ -250,8 +292,22 @@ async function findHardcoverSeriesUncached(book: {
     }
   }
 
-  const hits = await searchBooksRaw(book.authors[0] ? `${book.title} ${book.authors[0]}` : book.title);
-  const hit = pick(hits, "title-author");
+  // Edition notes in parentheses ("Heartless (Special Edition)") throw the
+  // search off — Hardcover finds "Heartless" by Elsie Silver instantly
+  // without them, and returns nothing useful with them.
+  const searchTitle = book.title.replace(/\s*\([^)]*\)\s*/g, " ").trim() || book.title;
+  const hits = await searchBooksRaw(book.authors[0] ? `${searchTitle} ${book.authors[0]}` : searchTitle);
+  let hit = pick(hits, "title-author");
+
+  // A title numbered off its own series ("Zodiac Academy 6") can be a
+  // stray edition Hardcover hasn't attached to the series, so a title
+  // search comes back with nothing in a series. Searching for just the
+  // series prefix + author finds the series' real members instead, and
+  // pick() then pins the position from the number in our title.
+  const numberedPrefix = book.title.match(/^(.+?)\s+\d+(?:\.\d+)?\s*(?:[:.,]|$)/)?.[1]?.trim();
+  if (!hit && numberedPrefix && book.authors[0]) {
+    hit = pick(await searchBooksRaw(`${numberedPrefix} ${book.authors[0]}`), "title-author");
+  }
   logger.info(SCOPE, hit ? "resolved series" : "no series found", {
     title: book.title,
     author: book.authors[0] ?? null,
@@ -317,7 +373,7 @@ export async function fetchHardcoverSeriesLineup(
   opts: CacheOptions = {}
 ): Promise<SeriesVolume[] | null> {
   if (!apiKey()) return null;
-  return withCache("hardcover", "lineup", seriesId, TTL.LINEUP, () => fetchHardcoverSeriesLineupUncached(seriesId), opts);
+  return swallowTransient(withCache("hardcover", "lineup", seriesId, TTL.LINEUP, () => fetchHardcoverSeriesLineupUncached(seriesId), opts), opts.onTransient);
 }
 
 async function fetchHardcoverSeriesLineupUncached(seriesId: string): Promise<SeriesVolume[] | null> {
@@ -325,13 +381,12 @@ async function fetchHardcoverSeriesLineupUncached(seriesId: string): Promise<Ser
   const numericId = Number(seriesId);
   if (!Number.isFinite(numericId)) return null;
 
-  const data = await graphql<SeriesLineupData>(
+  const data = await graphqlRequired<SeriesLineupData>(
     LINEUP_QUERY,
     { seriesId: numericId },
     "series lineup",
     8000
   );
-  if (!data) return null;
 
   const edges = data.series?.[0]?.book_series ?? [];
   const volumes: SeriesVolume[] = [];
@@ -375,7 +430,7 @@ export async function findHardcoverSeriesId(
   opts: CacheOptions = {}
 ): Promise<string | null> {
   if (!apiKey()) return null;
-  return withCache("hardcover", "series-id-by-name", name.toLowerCase(), TTL.SERIES, () => findHardcoverSeriesIdUncached(name), opts);
+  return swallowTransient(withCache("hardcover", "series-id-by-name", name.toLowerCase(), TTL.SERIES, () => findHardcoverSeriesIdUncached(name), opts), opts.onTransient);
 }
 
 async function findHardcoverSeriesIdUncached(name: string): Promise<string | null> {
@@ -386,7 +441,7 @@ async function findHardcoverSeriesIdUncached(name: string): Promise<string | nul
   interface SeriesSearchData {
     search?: { results?: { hits?: { document?: SeriesSearchDoc }[] } };
   }
-  const data = await graphql<SeriesSearchData>(
+  const data = await graphqlRequired<SeriesSearchData>(
     `query SearchSeries($query: String!) {
       search(query: $query, query_type: "Series", per_page: 5, page: 1) {
         results

@@ -2,7 +2,7 @@ import { Library } from "lucide-react";
 
 import { requireUser } from "@/lib/session";
 import { getSeriesOverview } from "@/lib/queries";
-import { SeriesCard } from "@/components/series-card";
+import { SeriesList } from "@/components/series-list";
 
 export default async function SeriesPage() {
   const user = await requireUser();
@@ -26,11 +26,7 @@ export default async function SeriesPage() {
           </p>
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
-          {series.map((s) => (
-            <SeriesCard key={s.id} series={s} />
-          ))}
-        </div>
+        <SeriesList series={series} />
       )}
     </div>
   );
