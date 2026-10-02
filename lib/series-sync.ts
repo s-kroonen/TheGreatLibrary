@@ -398,7 +398,10 @@ export async function ensureSeriesLineup(
   const now = Date.now();
 
   const ttl = cached.length ? LINEUP_TTL_MS : EMPTY_LINEUP_TTL_MS;
-  if (current.lookedUpAt && now - current.lookedUpAt.getTime() < ttl) {
+  // Hardcover lineups stored before volumes carried a sourceId/cover can't
+  // be added to a wishlist — refetch those once instead of waiting out the TTL.
+  const outdatedShape = current.source === "hardcover" && cached.some((v) => !v.sourceId);
+  if (!outdatedShape && current.lookedUpAt && now - current.lookedUpAt.getTime() < ttl) {
     logger.info(SCOPE, "lineup cache hit", { seriesId, name, cachedVolumeCount: cached.length });
     return cached;
   }

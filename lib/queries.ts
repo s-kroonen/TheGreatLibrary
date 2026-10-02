@@ -91,7 +91,8 @@ export async function getSeriesOverview(userId: string) {
         ? Math.max(...knownVolumes.map((v) => v.position))
         : null;
       const ownedMax = allPositions.length ? Math.max(...allPositions) : null;
-      const total = data.expectedCount ?? knownMax ?? ownedMax;
+      const positive = (n: number | null | undefined) => (n && n > 0 ? n : null);
+      const total = positive(data.expectedCount) ?? positive(knownMax) ?? positive(ownedMax);
 
       const volumeAt = new Map(knownVolumes.map((v) => [v.position, v]));
       const missing: {

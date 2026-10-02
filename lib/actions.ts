@@ -494,6 +494,9 @@ export async function addMissingSeriesBooksToWishlistAction(seriesId: string) {
 
   let added = 0;
   for (const volume of lineup) {
+    // Same range the Series page lists as "missing" — skips prequel
+    // anthologies (#0) and half-numbered novellas (#1.5).
+    if (volume.position < 1 || !Number.isInteger(volume.position)) continue;
     if (heldPositions.has(volume.position)) continue;
     if (
       (volume.isbn13 && ownedIsbns.has(volume.isbn13)) ||

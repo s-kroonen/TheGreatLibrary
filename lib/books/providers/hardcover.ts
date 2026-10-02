@@ -324,7 +324,10 @@ interface BookSeriesEdge {
   position?: number | null;
   details?: string | null;
   book?: {
+    id?: number;
     title?: string;
+    cached_image?: { url?: string } | null;
+    contributions?: { author?: { name?: string } | null }[];
     // ISBNs live on `editions`, not on `books` directly (confirmed
     // against the real schema after `isbns` on `books` errored: "field
     // 'isbns' not found in type: 'books'") — one edition is enough,
@@ -357,7 +360,14 @@ const LINEUP_QUERY = `
         position
         details
         book {
+          id
           title
+          cached_image
+          contributions(limit: 3) {
+            author {
+              name
+            }
+          }
           editions(limit: 1) {
             isbn_13
             isbn_10
@@ -373,7 +383,7 @@ export async function fetchHardcoverSeriesLineup(
   opts: CacheOptions = {}
 ): Promise<SeriesVolume[] | null> {
   if (!apiKey()) return null;
-  return swallowTransient(withCache("hardcover", "lineup", seriesId, TTL.LINEUP, () => fetchHardcoverSeriesLineupUncached(seriesId), opts), opts.onTransient);
+  return swallowTransient(withCache("hardcover", "lineup-v2", seriesId, TTL.LINEUP, () => fetchHardcoverSeriesLineupUncached(seriesId), opts), opts.onTransient);
 }
 
 async function fetchHardcoverSeriesLineupUncached(seriesId: string): Promise<SeriesVolume[] | null> {
@@ -403,10 +413,12 @@ async function fetchHardcoverSeriesLineupUncached(seriesId: string): Promise<Ser
       title,
       isbn13: edition?.isbn_13 ?? undefined,
       isbn10: edition?.isbn_10 ?? undefined,
-      // No Google Books/Open Library sourceId for this record — can't be
-      // one-click-added to a wishlist (addMissingSeriesBooksToWishlistAction
-      // skips volumes without source+sourceId), but it still shows
-      // correctly in the "what's missing" list, which is the main value.
+      // Hardcover's own book id doubles as the sourceId, so the volume can
+      // be one-click-added to a wishlist like any other provider's.
+      coverUrl: edge.book?.cached_image?.url ?? undefined,
+      source: edge.book?.id != null ? "hardcover" : undefined,
+      sourceId: edge.book?.id != null ? String(edge.book.id) : undefined,
+      authors: edge.book?.contributions?.map((c) => c.author?.name).filter((n): n is string => !!n),
     });
   }
 

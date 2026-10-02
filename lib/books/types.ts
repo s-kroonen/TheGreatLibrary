@@ -1,4 +1,4 @@
-export type BookSource = "googlebooks" | "openlibrary" | "manual";
+export type BookSource = "googlebooks" | "openlibrary" | "hardcover" | "manual";
 
 /** External sources used specifically for series detection (not the main
  * book search/add pipeline above) — see lib/series-sync.ts. */

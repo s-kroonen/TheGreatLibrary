@@ -74,7 +74,7 @@ export interface SeriesVolume {
   /** Which provider `sourceId` belongs to (Open Library work "/works/OL…W",
    * or a Google Books volume id), plus authors — enough to turn a lineup
    * entry back into a book we can add to a wishlist. */
-  source?: "openlibrary" | "googlebooks";
+  source?: "openlibrary" | "googlebooks" | "hardcover";
   sourceId?: string;
   authors?: string[];
 }
